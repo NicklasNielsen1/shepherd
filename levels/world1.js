@@ -1,0 +1,92 @@
+// World 1: Shepherd School. Six levels that teach the three shepherds one at a time.
+// The level format is explained at the top of physics.js.
+(globalThis.LEVELS = globalThis.LEVELS || []).push(
+  // One Anchor: the missile flies flat and passes under the ring; an Anchor above its path lifts it.
+  {
+    id: 'w1-1',
+    name: 'First Nudge',
+    hint: 'The missile misses on its own. Tap Anchor, then tap the sky: its pull bends the missile towards it.',
+    silo: { x: -500, y: 150, vx: 120, vy: 0 },
+    target: { x: 470, y: -220, r: 34 },
+    bodies: [],
+    walls: [],
+    zones: [ { x: 250, y: -400, w: 350, h: 800 } ],
+    tray: { anchor: 2, runner: 0, pusher: 0 },
+    par: 1,
+    solution: [ { type: 'anchor', x: -123, y: 27 } ],
+  },
+  // Two Anchors: a wall hangs from the top, the ring hides behind it. Dip under, then climb.
+  {
+    id: 'w1-2',
+    name: 'Under and Up',
+    hint: 'One Anchor pulls the missile down under the wall. A second one lifts it back up to the ring.',
+    silo: { x: -500, y: -100, vx: 120, vy: 0 },
+    target: { x: 480, y: -200, r: 36 },
+    bodies: [],
+    walls: [ { x1: 0, y1: -400, x2: 0, y2: -40 } ],
+    zones: [],
+    tray: { anchor: 3, runner: 0, pusher: 0 },
+    par: 2,
+    solution: [ { type: 'anchor', x: -429, y: 94 }, { type: 'anchor', x: 185, y: -50 } ],
+  },
+  // First Runner: nothing may be built on the right, so the pull has to travel there by itself.
+  {
+    id: 'w1-3',
+    name: 'Running Mate',
+    hint: 'You cannot build in the shaded area. Fling a Runner so it flies beside the missile and drags it along.',
+    silo: { x: -500, y: 250, vx: 120, vy: 0 },
+    target: { x: 480, y: -200, r: 38 },
+    bodies: [],
+    walls: [ { x1: -50, y1: -400, x2: -50, y2: 120 } ],
+    zones: [ { x: -400, y: -400, w: 1000, h: 800 } ],
+    tray: { anchor: 0, runner: 2, pusher: 0 },
+    par: 1,
+    solution: [ { type: 'runner', x: -443, y: 303, vx: 129, vy: -58 } ],
+  },
+  // A Runner in orbit: the star swings the missile the wrong way; a Runner circling the star tugs it back.
+  {
+    id: 'w1-4',
+    name: 'Moon Duty',
+    hint: 'The star bends the missile too far. Fling a Runner sideways near the star so it goes into orbit, and time its tug.',
+    silo: { x: -500, y: -200, vx: 110, vy: 0 },
+    target: { x: 430, y: -280, r: 34 },
+    bodies: [ { x: 0, y: 0, m: 900000, fixed: true, color: '#ffb35e' } ],
+    walls: [],
+    zones: [ { x: -600, y: -400, w: 1200, h: 280 }, { x: 250, y: -120, w: 350, h: 520 } ],
+    tray: { anchor: 0, runner: 2, pusher: 0 },
+    par: 1,
+    solution: [ { type: 'runner', x: -241, y: -85, vx: 20, vy: -73 } ],
+  },
+  // Pusher: a planet sits right on the line to the ring. Push the missile over it.
+  {
+    id: 'w1-5',
+    name: 'Cold Shoulder',
+    hint: 'A Pusher shoves the missile away instead of pulling it. Use one to hop over the planet.',
+    silo: { x: -500, y: 0, vx: 120, vy: 0 },
+    target: { x: 480, y: 0, r: 32 },
+    bodies: [ { x: 0, y: 0, m: 200000, fixed: true, color: '#7be3a4' } ],
+    walls: [ { x1: 0, y1: 0, x2: 0, y2: 400 } ],
+    zones: [ { x: -600, y: -400, w: 1200, h: 330 } ],
+    tray: { anchor: 0, runner: 0, pusher: 2 },
+    par: 1,
+    solution: [ { type: 'pusher', x: -198, y: 154 } ],
+  },
+  // Finale: two walls make a zig-zag, and each shepherd has a job.
+  {
+    id: 'w1-6',
+    name: 'Graduation',
+    hint: 'Down under the first wall, up over the second. Use everything you have learned.',
+    silo: { x: -520, y: -80, vx: 120, vy: 0 },
+    target: { x: 500, y: 60, r: 46 },
+    bodies: [],
+    walls: [ { x1: -220, y1: -400, x2: -220, y2: 0 }, { x1: 240, y1: 400, x2: 240, y2: -20 } ],
+    zones: [ { x: -220, y: -400, w: 460, h: 800 } ],
+    tray: { anchor: 1, runner: 1, pusher: 1 },
+    par: 3,
+    solution: [
+      { type: 'anchor', x: 298, y: 11 },
+      { type: 'runner', x: -523, y: 17, vx: 148, vy: -5 },
+      { type: 'pusher', x: -366, y: -280 },
+    ],
+  },
+);

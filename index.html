@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shepherd</title>
+<style>
+  * { box-sizing: border-box; }
+  /* Without this, any element given its own "display" style would ignore the hidden attribute. */
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060d; color: #dfe6ff;
+    font-family: system-ui, "Segoe UI", sans-serif; overscroll-behavior: none;
+    user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  .panel { background: rgba(14, 18, 36, .85); border: 1px solid #2b3358; border-radius: 12px;
+    padding: 10px 12px; backdrop-filter: blur(6px); }
+  #hud { position: fixed; top: 12px; left: 12px; max-width: min(400px, calc(100% - 150px));
+    pointer-events: none; }   /* taps pass through, so you can still build underneath it */
+  #hud h1 { margin: 0; font-size: 17px; }
+  #hud p { margin: 3px 0 0; font-size: 13px; color: #9aa6d6; }
+  #hud .count { color: #dfe6ff; }
+  #corner { position: fixed; top: 12px; right: 12px; display: flex; gap: 6px; flex-direction: column; }
+  #buttons { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); display: flex;
+    gap: 8px; flex-wrap: wrap; justify-content: center; width: max-content; max-width: calc(100% - 24px); }
+  button { font: inherit; font-size: 13px; color: #dfe6ff; background: #1b2244; border: 1px solid #36407a;
+    border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button:hover { background: #262f5e; }
+  button.primary, button.on { background: #4254c5; border-color: #8a9bff; }
+  button:disabled { opacity: .4; cursor: default; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  /* Phones and other small or touch screens: bigger buttons, smaller info panel. */
+  @media (pointer: coarse), (max-width: 700px) {
+    #buttons button { padding: 10px 12px; font-size: 14px; }
+    #hud { padding: 7px 9px; max-width: min(300px, calc(100% - 120px)); }
+    #hud h1 { font-size: 14px; }
+    #hud p { font-size: 11.5px; margin-top: 2px; }
+  }
+  .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(5, 6, 13, .72); padding: 16px; overflow: auto; }
+  .card { width: min(520px, 100%); max-height: 100%; overflow: auto; text-align: center; padding: 20px; }
+  .card h2 { margin: 0 0 4px; font-size: 26px; letter-spacing: 1px; }
+  .card p { margin: 4px 0 12px; color: #9aa6d6; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .lvl { padding: 8px 4px; text-align: center; line-height: 1.25; }
+  .lvl b { display: block; font-size: 13px; }
+  .lvl span { font-size: 13px; color: #ffd75e; letter-spacing: 1px; }
+  .stars { font-size: 40px; color: #ffd75e; letter-spacing: 6px; margin: 6px 0; }
+  .stars i { color: #39406a; font-style: normal; }
+  .rowc { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud" class="panel" hidden>
+  <h1 id="lvlName"></h1>
+  <p id="lvlHint"></p>
+  <p class="count" id="lvlCount"></p>
+  <p id="turn" hidden style="color:#ffb347">Tip: turn your phone sideways for a bigger view.</p>
+</div>
+
+<div id="corner" hidden>
+  <button id="btnMenu">Levels</button>
+  <button id="btnSolution">Solution</button>
+  <button id="btnRestart">Restart pass</button>
+</div>
+
+<div id="buttons" hidden>
+  <button id="trayAnchor" data-type="anchor"></button>
+  <button id="trayRunner" data-type="runner"></button>
+  <button id="trayPusher" data-type="pusher"></button>
+  <button id="btnTool"></button>
+  <button id="btnRemove">Remove</button>
+</div>
+
+<div id="menu" class="overlay">
+  <div class="card panel">
+    <h2>SHEPHERD</h2>
+    <p>The missile fires by itself, over and over, and misses. Place and fling your shepherds so their gravity guides it into the green ring.</p>
+    <p id="devNote" hidden style="color:#ffb347">Dev mode: all levels unlocked. Type "dev" again to turn it off.</p>
+    <div class="grid" id="levels"></div>
+    <!-- TEMPORARY, for testing on a phone: remove this button (and its line in showMenu and
+         its onclick below) when it is no longer needed. Typing "dev" keeps working without it. -->
+    <div class="rowc"><button id="btnDev" style="opacity:.6;font-size:12px"></button></div>
+  </div>
+</div>
+
+<div id="win" class="overlay" hidden>
+  <div class="card panel">
+    <h2 id="winTitle"></h2>
+    <div class="stars" id="winStars"></div>
+    <p id="winText"></p>
+    <div class="rowc">
+      <button id="btnKeep">Keep tinkering</button>
+      <button id="btnWinMenu">Levels</button>
+      <button id="btnNext" class="primary">Next level</button>
+    </div>
+  </div>
+</div>
+
+<script src="physics.js"></script>
+<script src="levels/world1.js"></script>
+<script>
+const P = ShepherdPhysics;
+const LEVELS = globalThis.LEVELS || [];
+const $ = id => document.getElementById(id);
+const STAR = '★', LOCK = '🔒', TIMES = '×', MIDDOT = '·';
+
+// ---------- Saved progress ----------
+// Stars per level are kept in localStorage, the browser's small per-site storage.
+const SAVE_KEY = 'shepherd-progress';
+let progress = {};
+try { progress = JSON.parse(localStorage.getItem(SAVE_KEY)) || {}; } catch (e) { progress = {}; }
+function saveProgress() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(progress)); } catch (e) {} }
+// Dev mode opens every level for testing. Turn it on or off by typing the letters d, e, v
+// anywhere on the page (or add ?unlock to the address). It is remembered in this browser.
+const DEV_KEY = 'shepherd-dev';
+let unlockAll = location.search.includes('unlock');
+try { unlockAll = unlockAll || localStorage.getItem(DEV_KEY) === '1'; } catch (e) {}
+let typed = '';
+addEventListener('keydown', e => {
+  if (e.key.length !== 1) return;
+  typed = (typed + e.key.toLowerCase()).slice(-3);
+  if (typed !== 'dev') return;
+  typed = '';
+  toggleDev();
+});
+function toggleDev() {
+  unlockAll = !unlockAll;
+  try { localStorage.setItem(DEV_KEY, unlockAll ? '1' : '0'); } catch (e) {}
+  if (mode === 'menu') showMenu(); else say(unlockAll ? 'Dev mode on: all levels unlocked' : 'Dev mode off');
+}
+const isUnlocked = i => unlockAll || i === 0 || progress[LEVELS[i - 1].id] > 0;
+
+// ---------- Game state ----------
+const canvas = $('c'), ctx = canvas.getContext('2d');
+let W = 0, H = 0, zoom = 1;
+let mode = 'menu';            // 'menu' | 'play' | 'won'
+let levelIndex = 0, level = null;
+let shepherds = [];           // what the player has put down: {type, x, y, vx, vy}
+let selected = -1;            // which shepherd the buttons and drags act on
+let placing = null;           // tray type waiting to be put down, or null
+let tool = 'fling';           // what a drag does to a Runner or Pusher: 'fling' | 'move'
+let pass = null;              // the pass being played right now (from physics.js)
+let passCount = 0, wait = 0;  // wait: pause after a pass ends, before the next one
+let trail = [], ghost = [];   // the missile's path this pass, and on the pass before
+let preview = { missile: [], paths: [] };   // dotted lines of where things will go
+let usedSolution = false, celebrated = false;
+let sparks = [], message = null, clock = 0, stepBank = 0;
+let drag = null;
+
+function say(text) { message = { until: clock + 2.4, text }; }
+
+function startLevel(i) {
+  if (!LEVELS[i]) return;
+  levelIndex = i; level = LEVELS[i];
+  shepherds = []; selected = -1; placing = null; tool = 'fling';
+  usedSolution = false; celebrated = false;
+  trail = []; ghost = []; sparks = []; passCount = 0; message = null;
+  mode = 'play';
+  $('menu').hidden = true; $('win').hidden = true;
+  $('hud').hidden = false; $('buttons').hidden = false; $('corner').hidden = false;
+  $('lvlName').textContent = `${i + 1}. ${level.name}`;
+  $('lvlHint').textContent = level.hint;
+  // Pick the first shepherd type for the player, so the very first tap already builds something.
+  placing = ['anchor', 'runner', 'pusher'].find(t => level.tray[t] > 0) || null;
+  changed();
+}
+
+function showMenu() {
+  mode = 'menu';
+  $('hud').hidden = true; $('buttons').hidden = true; $('corner').hidden = true; $('win').hidden = true;
+  $('menu').hidden = false;
+  $('devNote').hidden = !unlockAll;
+  $('btnDev').textContent = unlockAll ? 'Dev mode: on (tap to turn off)' : 'Dev mode: off (tap to unlock all levels)';
+  const grid = $('levels');
+  grid.innerHTML = '';
+  LEVELS.forEach((lv, i) => {
+    const b = document.createElement('button');
+    b.className = 'lvl';
+    const open = isUnlocked(i), stars = progress[lv.id] || 0;
+    b.disabled = !open;
+    b.innerHTML = `<b>${i + 1}. ${lv.name}</b><span>${open ? STAR.repeat(stars) + '<i style="color:#39406a;font-style:normal">' + STAR.repeat(3 - stars) + '</i>' : LOCK}</span>`;
+    b.onclick = () => startLevel(i);
+    grid.appendChild(b);
+  });
+}
+
+// ---------- Shepherds ----------
+const countOf = type => shepherds.filter(s => s.type === type).length;
+const leftOf = type => (level.tray[type] || 0) - countOf(type);
+const radiusOf = s => P.radiusFor(P.TYPES[s.type].m);
+const parText = () => level.par === 1 ? 'only 1' : `${level.par} or fewer`;
+
+// May this shepherd stand at (x, y)? Returns '' or the reason why not. "skip" is its own place in the list.
+function whyNot(type, x, y, skip) {
+  const why = P.whyNotBuildable(level, type, x, y);
+  if (why) return why;
+  const r = P.radiusFor(P.TYPES[type].m);
+  for (let i = 0; i < shepherds.length; i++)
+    if (i !== skip && Math.hypot(shepherds[i].x - x, shepherds[i].y - y) < r + radiusOf(shepherds[i]) + 6) return 'too close to another shepherd';
+  return '';
+}
+
+function place(type, x, y, vx, vy) {
+  if (leftOf(type) <= 0) { say(`No ${P.TYPES[type].name}s left in the tray`); return false; }
+  const why = whyNot(type, x, y, -1);
+  if (why) { say("Can't build there: " + why); return false; }
+  const v = P.TYPES[type].fixed ? { vx: 0, vy: 0 } : P.clampFling(vx || 0, vy || 0);
+  shepherds.push({ type, x: Math.round(x), y: Math.round(y), vx: v.vx, vy: v.vy });
+  selected = shepherds.length - 1;
+  placing = null;
+  return true;
+}
+
+function removeSelected() {
+  if (selected < 0) return;
+  shepherds.splice(selected, 1);
+  selected = -1;
+  changed();
+}
+
+function useSolution() {
+  shepherds = level.solution.map(s => ({ type: s.type, x: s.x, y: s.y, vx: s.vx || 0, vy: s.vy || 0 }));
+  selected = -1; placing = null; usedSolution = true;
+  say('Solution placed. Watch what each shepherd does.');
+  changed();
+}
+
+// Call after any change to the shepherds: redo the dotted lines, the buttons, and start a new pass.
+function changed() {
+  celebrated = false;
+  computePreview();
+  refreshUI();
+  restartPass();
+}
+
+// Play the set-up forward invisibly to find where each moving shepherd will go (the dotted
+// lines) and where the missile goes in its first second.
+function computePreview() {
+  const st = P.createPass(level, shepherds);
+  const mine = st.things.filter(t => t.shepherd);
+  preview = { missile: [[st.missile.x, st.missile.y]], paths: mine.map(t => [[t.x, t.y]]) };
+  for (let n = 1; n <= 6 * 120; n++) {
+    P.stepPass(st);
+    if (!st.noMissile) {
+      if (n % 6 === 0) preview.missile.push([st.missile.x, st.missile.y]);
+      if (st.result || n >= 120) { st.result = null; st.noMissile = true; }   // from here on, shepherds only
+    }
+    if (n % 6 === 0) mine.forEach((t, i) => { if (!t.dead && !t.fixed) preview.paths[i].push([t.x, t.y]); });
+  }
+}
+
+function refreshUI() {
+  for (const type of ['anchor', 'runner', 'pusher']) {
+    const b = $('tray' + P.TYPES[type].name), n = leftOf(type);
+    b.hidden = !(level.tray[type] > 0);
+    b.disabled = n <= 0;
+    b.className = placing === type ? 'on' : '';
+    b.innerHTML = `<span class="dot" style="background:${P.TYPES[type].color}"></span>${P.TYPES[type].name} ${TIMES}${n}`;
+  }
+  const s = shepherds[selected];
+  $('btnTool').hidden = !(level.tray.runner > 0 || level.tray.pusher > 0);
+  $('btnTool').disabled = !s || P.TYPES[s.type].fixed;
+  $('btnTool').textContent = tool === 'fling' ? 'Drag: fling' : 'Drag: move';
+  $('btnRemove').disabled = !s;
+  $('lvlCount').textContent = `Shepherds used: ${shepherds.length} ${MIDDOT} 3 stars: use ${parText()}`;
+  $('turn').hidden = !(H > W && W < 700);
+}
+
+// ---------- The loop: one pass after another ----------
+function restartPass() {
+  if (trail.length > 20) ghost = trail;
+  trail = [];
+  pass = P.createPass(level, shepherds);
+  passCount++; wait = 0; stepBank = 0;
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, v = 20 + Math.random() * 90;
+    sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.5 + Math.random() * 0.5, color });
+  }
+}
+
+function stepOnce() {
+  const r = P.stepPass(pass), m = pass.missile;
+  trail.push([m.x, m.y]);
+  for (const e of pass.events.splice(0)) burst(e.x, e.y, '#9fd8ff', 14);
+  if (!r) return;
+  if (r === 'hit') { burst(m.x, m.y, '#7dffb0', 40); onHit(); }
+  else { if (r === 'crash') burst(m.x, m.y, '#ffb347', 24); wait = 0.9; }
+}
+
+function onHit() {
+  wait = 1.2;
+  if (celebrated) { say('Hit again!'); return; }
+  celebrated = true;
+  const used = shepherds.length;
+  let stars = used <= level.par ? 3 : used === level.par + 1 ? 2 : 1;
+  if (usedSolution) stars = 1;
+  progress[level.id] = Math.max(progress[level.id] || 0, stars);
+  saveProgress();
+  mode = 'won';
+  $('winTitle').textContent = 'Target hit!';
+  $('winStars').innerHTML = STAR.repeat(stars) + '<i>' + STAR.repeat(3 - stars) + '</i>';
+  $('winText').textContent = usedSolution ? 'You used the built-in solution, so this counts for 1 star. Try it your own way for more.'
+    : `You used ${used} shepherd${used === 1 ? '' : 's'}. For three stars, use ${parText()}.`;
+  $('btnNext').hidden = levelIndex >= LEVELS.length - 1;
+  $('win').hidden = false;
+}
+
+// Move the game forward by dt seconds. Physics always runs in fixed steps of P.DT.
+function advance(dt) {
+  clock += dt;
+  for (const s of sparks) { s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt; }
+  sparks = sparks.filter(s => s.life > 0);
+  if (mode !== 'play' || !pass) return;
+  if (pass.result) { wait -= dt; if (wait <= 0) restartPass(); return; }
+  stepBank += dt;
+  while (stepBank >= P.DT && !pass.result && mode === 'play') { stepBank -= P.DT; stepOnce(); }
+}
+
+// ---------- Screen and world positions ----------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  zoom = Math.min(W / (2 * P.AREA.x + 30), H / (2 * P.AREA.y + 30));
+  if (level && mode !== 'menu') refreshUI();
+}
+const sx = x => W / 2 + x * zoom, sy = y => H / 2 + y * zoom;
+const toWorld = (px, py) => [(px - W / 2) / zoom, (py - H / 2) / zoom];
+
+function shepherdAt(px, py) {
+  let best = -1, bd = Infinity;
+  shepherds.forEach((s, i) => {
+    const d = Math.hypot(sx(s.x) - px, sy(s.y) - py);
+    if (d < radiusOf(s) * zoom + 22 && d < bd) { bd = d; best = i; }
+  });
+  return best;
+}
+
+// ---------- Touch and mouse ----------
+// Tap a tray button, then tap the field to put that shepherd down. After that, a drag ANYWHERE
+// on the screen (like a laptop trackpad) changes the selected shepherd: it either sets its
+// fling arrow or moves it, depending on the Drag button. Tap a shepherd to select it.
+const fullDrag = () => Math.max(140, Math.min(W, H) * 0.45);   // drag this far for a full-speed fling
+
+canvas.addEventListener('pointerdown', e => {
+  if (mode !== 'play') return;
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  let fresh = false;
+  if (placing) {
+    const [wx, wy] = toWorld(e.clientX, e.clientY);
+    if (!place(placing, wx, wy)) return;
+    fresh = true;
+    computePreview(); refreshUI();
+  }
+  drag = { px: e.clientX, py: e.clientY, moved: false, fresh, edited: fresh, hit: fresh ? -1 : shepherdAt(e.clientX, e.clientY), kind: null };
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!drag || mode !== 'play') return;
+  const dx = e.clientX - drag.px, dy = e.clientY - drag.py;
+  if (!drag.moved) {
+    if (Math.hypot(dx, dy) < 8) return;
+    drag.moved = true;
+    if (drag.hit >= 0) selected = drag.hit;        // a drag that starts on a shepherd grabs that one
+    const s = shepherds[selected];
+    if (!s) { say(placing ? '' : 'Tap a shepherd in the tray first'); return; }
+    drag.kind = (P.TYPES[s.type].fixed || tool === 'move') ? 'move' : 'fling';
+    drag.o = { ...s };
+    refreshUI();
+  }
+  const s = shepherds[selected];
+  if (!s || !drag.kind) return;
+  if (drag.kind === 'fling') {
+    const k = P.MAX_FLING / fullDrag();
+    const v = P.clampFling(drag.o.vx + dx * k, drag.o.vy + dy * k);
+    s.vx = Math.round(v.vx); s.vy = Math.round(v.vy);
+  } else {
+    const nx = Math.round(drag.o.x + dx / zoom), ny = Math.round(drag.o.y + dy / zoom);
+    const why = whyNot(s.type, nx, ny, selected);
+    if (why) { say("Can't go there: " + why); return; }
+    s.x = nx; s.y = ny;
+  }
+  drag.edited = true;
+  computePreview();
+});
+
+function endDrag() {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (mode !== 'play') return;
+  if (!d.moved && !d.fresh && d.hit >= 0) { selected = d.hit; refreshUI(); }
+  if (d.edited) changed();     // the new set-up starts a fresh pass straight away
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+for (const type of ['anchor', 'runner', 'pusher'])
+  $('tray' + P.TYPES[type].name).onclick = () => { placing = placing === type ? null : type; if (placing) say('Now tap where it should go'); refreshUI(); };
+$('btnTool').onclick = () => { tool = tool === 'fling' ? 'move' : 'fling'; refreshUI(); };
+$('btnRemove').onclick = removeSelected;
+$('btnRestart').onclick = restartPass;
+$('btnSolution').onclick = useSolution;
+$('btnMenu').onclick = showMenu;
+$('btnWinMenu').onclick = showMenu;
+$('btnKeep').onclick = () => { $('win').hidden = true; mode = 'play'; restartPass(); };
+$('btnNext').onclick = () => startLevel(levelIndex + 1);
+$('btnDev').onclick = toggleDev;   // TEMPORARY (see the note next to the button above)
+
+// ---------- Drawing ----------
+const stars = Array.from({ length: 140 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 1.2 + 0.3, a: Math.random() * 0.6 + 0.2 }));
+
+function glowBall(x, y, r, color) {
+  const px = sx(x), py = sy(y), pr = Math.max(2, r * zoom);
+  const g = ctx.createRadialGradient(px, py, pr * 0.2, px, py, pr * 2.6);
+  g.addColorStop(0, color); g.addColorStop(0.4, color + '55'); g.addColorStop(1, color + '00');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, pr * 2.6, 0, 6.283); ctx.fill();
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, pr, 0, 6.283); ctx.fill();
+}
+
+function line(points, color, width, dash) {
+  if (points.length < 2) return;
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+  ctx.beginPath();
+  points.forEach((p, i) => i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1])));
+  ctx.stroke(); ctx.setLineDash([]);
+}
+
+function arrow(x0, y0, x1, y1, color, width) {
+  const a = Math.atan2(y1 - y0, x1 - x0), h = 4 + width * 2.5;
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - h * Math.cos(a - 0.45), y1 - h * Math.sin(a - 0.45));
+  ctx.lineTo(x1 - h * Math.cos(a + 0.45), y1 - h * Math.sin(a + 0.45));
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  ctx.fillStyle = '#05060d'; ctx.fillRect(0, 0, W, H);
+  for (const s of stars) { ctx.fillStyle = `rgba(255,255,255,${s.a})`; ctx.fillRect(s.x * W, s.y * H, s.r, s.r); }
+  if (!level || mode === 'menu') return;
+
+  // Edge of the play area.
+  ctx.strokeStyle = '#1c2344'; ctx.lineWidth = 1;
+  ctx.strokeRect(sx(-P.AREA.x), sy(-P.AREA.y), 2 * P.AREA.x * zoom, 2 * P.AREA.y * zoom);
+
+  // No-build zones: shaded with stripes.
+  for (const z of level.zones || []) {
+    const x = sx(z.x), y = sy(z.y), w = z.w * zoom, h = z.h * zoom;
+    ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.fillStyle = 'rgba(255, 110, 110, .06)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255, 110, 110, .10)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let k = -h; k < w; k += 14) { ctx.moveTo(x + k, y + h); ctx.lineTo(x + k + h, y); }
+    ctx.stroke(); ctx.restore();
+    ctx.strokeStyle = 'rgba(255, 110, 110, .28)'; ctx.setLineDash([5, 5]); ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+  }
+
+  // Walls.
+  ctx.lineCap = 'round';
+  for (const w of level.walls || []) {
+    ctx.strokeStyle = 'rgba(255, 120, 90, .25)'; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.moveTo(sx(w.x1), sy(w.y1)); ctx.lineTo(sx(w.x2), sy(w.y2)); ctx.stroke();
+    ctx.strokeStyle = '#ff8a6b'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(sx(w.x1), sy(w.y1)); ctx.lineTo(sx(w.x2), sy(w.y2)); ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+
+  // Target ring.
+  const tg = level.target, pulse = 1 + 0.05 * Math.sin(clock * 3);
+  ctx.strokeStyle = '#5dff9c'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(sx(tg.x), sy(tg.y), tg.r * zoom * pulse, 0, 6.283); ctx.stroke();
+  ctx.fillStyle = 'rgba(93, 255, 156, .10)'; ctx.fill();
+
+  // Silo, with an arrow showing which way the missile leaves.
+  const so = level.silo, sa = Math.atan2(so.vy, so.vx);
+  ctx.fillStyle = '#8a9bff'; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 7, 0, 6.283); ctx.fill();
+  ctx.strokeStyle = '#8a9bff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 13, 0, 6.283); ctx.stroke();
+
+  // The pass before this one (faint), the missile's first second (dots), this pass (bright).
+  line(ghost, 'rgba(160, 175, 255, .22)', 1.5);
+  line(preview.missile, 'rgba(255, 255, 255, .35)', 1.5, [2, 6]);
+  line(trail, '#ffffff', 2);
+
+  // Where each of your shepherds starts, where it will travel, and its fling arrow.
+  shepherds.forEach((s, i) => {
+    const t = P.TYPES[s.type], px = sx(s.x), py = sy(s.y), pr = Math.max(4, radiusOf(s) * zoom);
+    line(preview.paths[i] || [], t.color + '99', 1.5, [3, 5]);
+    ctx.strokeStyle = t.color; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.arc(px, py, pr + 3, 0, 6.283); ctx.stroke(); ctx.setLineDash([]);
+    if (i === selected) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(px, py, pr + 8, 0, 6.283); ctx.stroke(); }
+    const speed = Math.hypot(s.vx, s.vy);
+    if (!t.fixed && speed > 1) {
+      const len = pr + 10 + 70 * speed / P.MAX_FLING;
+      arrow(px, py, px + len * s.vx / speed, py + len * s.vy / speed, i === selected ? '#ffffff' : t.color, 2);
+      if (i === selected) {
+        ctx.fillStyle = '#ffffff'; ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(Math.round(100 * speed / P.MAX_FLING) + '%', px + (len + 16) * s.vx / speed, py + (len + 16) * s.vy / speed + 4);
+      }
+    }
+  });
+
+  // Everything that is flying right now.
+  if (pass) {
+    for (const b of pass.things) {
+      if (b.dead) continue;
+      const color = b.color || (b.m < 0 ? '#b44dff' : '#f0a35e');
+      glowBall(b.x, b.y, b.r, color);
+      if (b.m < 0) {   // a Pusher gets a ring, so it reads as "pushes away"
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(sx(b.x), sy(b.y), b.r * zoom * (1.6 + 0.5 * ((clock * 0.8) % 1)), 0, 6.283); ctx.stroke();
+      }
+    }
+    if (!pass.result) {
+      const m = pass.missile, a = Math.atan2(m.vy, m.vx), px = sx(m.x), py = sy(m.y);
+      ctx.fillStyle = '#ffffff'; ctx.beginPath();
+      ctx.moveTo(px + 9 * Math.cos(a), py + 9 * Math.sin(a));
+      ctx.lineTo(px + 6 * Math.cos(a + 2.5), py + 6 * Math.sin(a + 2.5));
+      ctx.lineTo(px + 6 * Math.cos(a - 2.5), py + 6 * Math.sin(a - 2.5));
+      ctx.closePath(); ctx.fill();
+    }
+  }
+  arrow(sx(so.x) + 16 * Math.cos(sa), sy(so.y) + 16 * Math.sin(sa), sx(so.x) + 34 * Math.cos(sa), sy(so.y) + 34 * Math.sin(sa), '#8a9bff', 2);
+
+  for (const s of sparks) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, s.life * 2)); ctx.fillStyle = s.color;
+    ctx.fillRect(sx(s.x) - 1.5, sy(s.y) - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  if (message && message.text && clock < message.until) {
+    ctx.font = '14px system-ui, sans-serif'; ctx.textAlign = 'center';
+    const tw = ctx.measureText(message.text).width + 24, y = H - 86;
+    ctx.fillStyle = 'rgba(14, 18, 36, .9)'; ctx.fillRect(W / 2 - tw / 2, y - 18, tw, 28);
+    ctx.fillStyle = '#ffd75e'; ctx.fillText(message.text, W / 2, y + 1);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  advance(dt); draw();
+  requestAnimationFrame(frame);
+}
+
+addEventListener('resize', resize);
+resize();
+showMenu();
+requestAnimationFrame(frame);
+
+// A handle for testing from the browser console, for example: game.startLevel(2); game.useSolution(); game.finishPass()
+window.game = {
+  levels: LEVELS, startLevel, showMenu, place: (...a) => { const ok = place(...a); changed(); return ok; },
+  useSolution, removeSelected, restartPass, advance,
+  finishPass() { while (mode === 'play' && pass && !pass.result) stepOnce(); return pass && pass.result; },
+  get mode() { return mode; }, get shepherds() { return shepherds; }, get selected() { return selected; },
+  get pass() { return pass; }, get progress() { return progress; }, get passCount() { return passCount; },
+  get message() { return message && message.text; }, get placing() { return placing; }, get tool() { return tool; },
+};
+</script>
+</body>
+</html>
