@@ -1,11 +1,11 @@
-// World 3: Twin Silos. Two missiles fire each pass, and both must reach the ring.
+// World 3: Twin Silos. Two streams of missiles, each with its own charge meter; both must be full.
 // They share the one gravity field you build. The level format is explained at the top of physics.js.
 (globalThis.LEVELS = globalThis.LEVELS || []).push(
   // Two missiles fly side by side. One Anchor between their paths pulls both inwards so they cross.
   {
     id: 'w3-1',
     name: 'Two at Once',
-    hint: 'New: two silos. Both missiles must reach the ring, and they share your shepherds.',
+    hint: 'New: two silos, and a meter for each. Both streams must pour into the ring together, and they share your shepherds.',
     silos: [ { x: -500, y: -90, vx: 120, vy: 0 }, { x: -500, y: 110, vx: 120, vy: 0 } ],
     target: { x: 48, y: 25, r: 34 },
     bodies: [],
@@ -43,19 +43,19 @@
     par: 2,
     solution: [ { type: 'anchor', x: 451, y: -316 }, { type: 'anchor', x: 229, y: 37 } ],
   },
-  // The second silo fires two seconds late, and nothing can be built on the right.
+  // Nothing can be built on the right: a slow Runner between the two streams gathers them both.
   {
     id: 'w3-4',
-    name: 'Late Start',
-    hint: 'The lower silo fires two seconds late. A moving Runner tugs each missile at a different moment.',
-    silos: [ { x: -500, y: -120, vx: 120, vy: 0 }, { x: -500, y: 120, vx: 120, vy: 0, delay: 2 } ],
+    name: 'Drifter',
+    hint: 'You cannot build on the right. Let a slow Runner drift between the two streams and pull them together.',
+    silos: [ { x: -500, y: -120, vx: 120, vy: 0 }, { x: -500, y: 120, vx: 120, vy: 0 } ],
     target: { x: 450, y: 0, r: 44 },
     bodies: [],
     walls: [],
     zones: [ { x: -350, y: -400, w: 950, h: 800 } ],
     tray: { anchor: 0, runner: 2, pusher: 0 },
     par: 1,
-    solution: [ { type: 'runner', x: -376, y: 226, vx: 59, vy: -50 } ],
+    solution: [ { type: 'runner', x: -382, y: -10, vx: -44, vy: -10 } ],
   },
   // A planet squeezes the two paths together too early. Push them apart, then gather them.
   {
@@ -71,19 +71,19 @@
     par: 2,
     solution: [ { type: 'anchor', x: 155, y: -52 }, { type: 'pusher', x: -407, y: -179 } ],
   },
-  // Finale: two silos and stardust together. Each missile has its own speck to collect.
+  // Finale: two silos and stardust together. Both streams must thread the same speck.
   {
     id: 'w3-6',
     name: 'Round Up',
-    hint: 'Two missiles, two specks. Gather both missiles into the ring, each through a speck.',
+    hint: 'Two streams, one speck. Both streams must pass through it on their way into the ring.',
     silos: [ { x: -500, y: -200, vx: 120, vy: 0 }, { x: -500, y: 170, vx: 120, vy: 0 } ],
     target: { x: 545, y: -32, r: 36 },
     bodies: [],
     walls: [],
     zones: [],
-    dust: [ { x: 133, y: -164 }, { x: 140, y: 128 } ],
+    dust: [ { x: 470, y: -30 } ],
     tray: { anchor: 2, runner: 0, pusher: 1 },
-    par: 1,
-    solution: [ { type: 'anchor', x: 50, y: 0 } ],
+    par: 2,
+    solution: [ { type: 'anchor', x: -83, y: -62 }, { type: 'anchor', x: 284, y: -224 } ],
   },
 );

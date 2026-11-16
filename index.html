@@ -64,7 +64,7 @@
 <div id="corner" hidden>
   <button id="btnMenu">Levels</button>
   <button id="btnSolution">Solution</button>
-  <button id="btnRestart">Restart pass</button>
+  <button id="btnSound"></button>
 </div>
 
 <div id="buttons" hidden>
@@ -78,7 +78,7 @@
 <div id="menu" class="overlay">
   <div class="card panel">
     <h2>SHEPHERD</h2>
-    <p>The missile fires by itself, over and over, and misses. Place and fling your shepherds so their gravity guides it into the green ring.</p>
+    <p>The silo fires a steady stream of missiles. Place and fling your shepherds so their gravity bends the stream into the green ring, and keep it there until the ring is charged.</p>
     <p id="devNote" hidden style="color:#ffb347">Dev mode: all levels unlocked. Type "dev" again to turn it off.</p>
     <div id="worlds"></div>
     <!-- TEMPORARY, for testing on a phone: remove this button (and its line in showMenu and
@@ -107,10 +107,12 @@
 <script>
 const P = ShepherdPhysics;
 const LEVELS = globalThis.LEVELS || [];
-const WORLD_NAMES = { 1: 'World 1 \u00B7 Shepherd School', 2: 'World 2 \u00B7 Stardust', 3: 'World 3 \u00B7 Twin Silos' };
+const WORLD_NAMES = { 1: 'World 1 · Shepherd School', 2: 'World 2 · Stardust', 3: 'World 3 · Twin Silos' };
 const worldOf = level => +level.id.match(/^w(\d+)/)[1];
 const $ = id => document.getElementById(id);
 const STAR = '★', LOCK = '🔒', TIMES = '×', MIDDOT = '·';
+const SPEED = 2;                                   // the game runs this many times faster than "real" physics time
+const STREAM_COLORS = ['#dfe8ff', '#ffd9a8'];      // one colour per silo
 
 // ---------- Saved progress ----------
 // Stars per level are kept in localStorage, the browser's small per-site storage.
@@ -138,21 +140,52 @@ function toggleDev() {
 }
 const isUnlocked = i => unlockAll || i === 0 || progress[LEVELS[i - 1].id] > 0;
 
+// ---------- Sound ----------
+// Sounds are made on the spot with the browser's built-in synthesizer (no sound files).
+// Browsers only allow sound after the first tap or click, so it starts then.
+const MUTE_KEY = 'shepherd-mute';
+let muted = false, audio = null, lastSound = {};
+try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
+function wakeAudio() {
+  if (audio || muted) return;
+  try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; }
+}
+// Play one short note. "gap" stops the same kind of sound from piling up (seconds between plays).
+function beep(kind, freq, dur, type, vol, gap, delay) {
+  if (muted || !audio) return;
+  const now = audio.currentTime;
+  if (gap && now - (lastSound[kind] || -9) < gap) return;
+  lastSound[kind] = now;
+  try {
+    const o = audio.createOscillator(), g = audio.createGain(), t0 = now + (delay || 0);
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(audio.destination);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+  } catch (e) {}
+}
+function setMuted(m) {
+  muted = m;
+  try { localStorage.setItem(MUTE_KEY, m ? '1' : '0'); } catch (e) {}
+  $('btnSound').textContent = m ? 'Sound: off' : 'Sound: on';
+  if (!m) wakeAudio();
+}
+
 // ---------- Game state ----------
 const canvas = $('c'), ctx = canvas.getContext('2d');
 let W = 0, H = 0, zoom = 1;
-let mode = 'menu';            // 'menu' | 'play' | 'won'
+let mode = 'menu';            // 'menu' | 'play' | 'winning' (short slow-motion) | 'won'
 let levelIndex = 0, level = null;
 let shepherds = [];           // what the player has put down: {type, x, y, vx, vy}
 let selected = -1;            // which shepherd the buttons and drags act on
 let placing = null;           // tray type waiting to be put down, or null
 let tool = 'fling';           // what a drag does to a Runner or Pusher: 'fling' | 'move'
-let pass = null;              // the pass being played right now (from physics.js)
-let passCount = 0, wait = 0;  // wait: pause after a pass ends, before the next one
-let trails = [], ghosts = []; // each missile's path this pass, and on the pass before
-let preview = { missiles: [], paths: [] };  // dotted lines of where things will go
-let usedSolution = false, celebrated = false;
-let sparks = [], message = null, clock = 0, stepBank = 0;
+let st = null;                // the running stream (from physics.js)
+let paths = [];               // dotted lines of where each moving shepherd will go
+let usedSolution = false, celebrated = false, winTimer = 0;
+let sparks = [], dustFlash = [], message = null, clock = 0, stepBank = 0;
 let drag = null;
 
 function say(text) { message = { until: clock + 2.4, text }; }
@@ -160,9 +193,10 @@ function say(text) { message = { until: clock + 2.4, text }; }
 function startLevel(i) {
   if (!LEVELS[i]) return;
   levelIndex = i; level = LEVELS[i];
-  shepherds = []; selected = -1; placing = null; tool = 'fling';
+  shepherds = []; selected = -1; tool = 'fling';
   usedSolution = false; celebrated = false;
-  trails = []; ghosts = []; sparks = []; passCount = 0; message = null;
+  sparks = []; dustFlash = []; message = null; stepBank = 0;
+  st = P.createStream(level, shepherds);
   mode = 'play';
   $('menu').hidden = true; $('win').hidden = true;
   $('hud').hidden = false; $('buttons').hidden = false; $('corner').hidden = false;
@@ -197,7 +231,7 @@ function showMenu() {
     const open = isUnlocked(i), stars = progress[lv.id] || 0;
     b.disabled = !open;
     b.innerHTML = '<b>' + lv.id.slice(1) + ' ' + lv.name + '</b><span>' + (open ? STAR.repeat(stars) + '<i style="color:#39406a;font-style:normal">' + STAR.repeat(3 - stars) + '</i>' : LOCK) + '</span>';
-    b.onclick = () => startLevel(i);
+    b.onclick = () => { wakeAudio(); startLevel(i); };
     grid.appendChild(b);
   });
 }
@@ -243,30 +277,26 @@ function useSolution() {
   changed();
 }
 
-// Call after any change to the shepherds: redo the dotted lines, the buttons, and start a new pass.
+// Call after any change to the shepherds. The stream keeps flowing: missiles already in
+// the air feel the new set-up straight away.
 function changed() {
   celebrated = false;
-  computePreview();
+  P.setShepherds(st, shepherds);
+  computePaths();
   refreshUI();
-  restartPass();
 }
 
-// Play the set-up forward invisibly to find where each moving shepherd will go (the dotted
-// lines) and where the missile goes in its first second.
-function computePreview() {
-  const st = P.createPass(level, shepherds);
-  const mine = st.things.filter(t => t.shepherd);
-  preview = { missiles: st.missiles.map(m => [[m.x, m.y]]), paths: mine.map(t => [[t.x, t.y]]) };
-  const lastLaunch = Math.max(...st.missiles.map(m => m.delay));
-  for (let n = 1; n <= 6 * 120; n++) {
-    P.stepPass(st);
-    if (!st.noMissile) {
-      if (n % 6 === 0) st.missiles.forEach((m, i) => {
-        if (!m.done && st.t >= m.delay && st.t <= m.delay + 1 && m !== st.failed) preview.missiles[i].push([m.x, m.y]);
-      });
-      if (st.result || st.t >= lastLaunch + 1) { st.result = null; st.noMissile = true; }   // from here on, shepherds only
-    }
-    if (n % 6 === 0) mine.forEach((t, i) => { if (!t.dead && !t.fixed) preview.paths[i].push([t.x, t.y]); });
+// Play one heartbeat forward invisibly (no missiles) to find where each moving shepherd
+// will go: these are the dotted lines.
+function computePaths() {
+  const ghost = P.createStream(level, shepherds);
+  ghost.noMissiles = true;
+  const mine = ghost.things.filter(t => t.shepherd);
+  paths = mine.map(t => [[t.x, t.y]]);
+  if (!mine.some(t => !t.fixed)) return;
+  for (let n = 1; n < P.BEAT * 120; n++) {
+    P.stepStream(ghost);
+    if (n % 6 === 0) mine.forEach((t, i) => { if (!t.dead && !t.fixed) paths[i].push([t.x, t.y]); });
   }
 }
 
@@ -283,57 +313,57 @@ function refreshUI() {
   $('btnTool').disabled = !s || P.TYPES[s.type].fixed;
   $('btnTool').textContent = tool === 'fling' ? 'Drag: fling' : 'Drag: move';
   $('btnRemove').disabled = !s;
-  showCount();
+  $('lvlCount').textContent = `Shepherds used: ${shepherds.length} ${MIDDOT} 3 stars: use ${parText()}`;
   $('turn').hidden = !(H > W && W < 700);
 }
 
-// The line under the hint: shepherds used, and stardust collected so far on this pass.
-function showCount() {
-  let text = 'Shepherds used: ' + shepherds.length + ' ' + MIDDOT + ' 3 stars: use ' + parText();
-  if (pass && pass.dust.length) text += ' ' + MIDDOT + ' Stardust: ' + pass.dust.filter(d => d.got).length + '/' + pass.dust.length;
-  $('lvlCount').textContent = text;
-}
-
-// ---------- The loop: one pass after another ----------
-function restartPass() {
-  if (trails.some(tr => tr.length > 20)) ghosts = trails;
-  pass = P.createPass(level, shepherds);
-  trails = pass.missiles.map(() => []);
-  passCount++; wait = 0; stepBank = 0;
-  showCount();
-}
-
-function burst(x, y, color, n) {
+// ---------- The stream ----------
+function burst(x, y, color, n, speed) {
   for (let i = 0; i < n; i++) {
-    const a = Math.random() * 6.283, v = 20 + Math.random() * 90;
-    sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.5 + Math.random() * 0.5, color });
+    const a = Math.random() * 6.283, v = (speed || 90) * (0.2 + Math.random() * 0.8);
+    sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.3 + Math.random() * 0.4, color });
   }
 }
 
 function stepOnce() {
-  const r = P.stepPass(pass);
-  pass.missiles.forEach((m, i) => { if (!m.done && pass.t >= m.delay) trails[i].push([m.x, m.y]); });
-  for (const e of pass.events.splice(0)) {
-    if (e.type === 'dust') { burst(e.x, e.y, '#ffe9a8', 16); showCount(); }
-    else if (e.type === 'hit') burst(e.x, e.y, '#7dffb0', 40);
-    else burst(e.x, e.y, '#9fd8ff', 14);
+  P.stepStream(st);
+  for (const e of st.events.splice(0)) {
+    if (e.type === 'hit') {
+      const full = Math.min(...st.charge) / st.goal;
+      burst(e.x, e.y, '#7dffb0', 5);
+      beep('hit', 440 * Math.pow(2, st.charge[e.silo] / st.goal), 0.12, 'sine', 0.06, 0.03);
+      if (full > 0.999) beep('full', 880, 0.2, 'triangle', 0.03, 0.2);
+    }
+    else if (e.type === 'crash') { burst(e.x, e.y, '#ffb347', 4, 60); beep('crash', 95, 0.09, 'triangle', 0.05, 0.07); }
+    else if (e.type === 'dust') { dustFlash[e.index] = clock; beep('dust', 1320, 0.05, 'sine', 0.02, 0.05); }
+    else if (e.type === 'fire') beep('fire', 220, 0.03, 'square', 0.006, 0.2);
+    else if (e.type === 'beat') beep('beat', 70, 0.18, 'sine', 0.07);
+    else if (e.type === 'shepherd') { burst(e.x, e.y, '#9fd8ff', 14); beep('pop', 160, 0.12, 'sawtooth', 0.03); }
   }
-  if (!r) return;
-  if (r === 'hit') onHit();
-  else { if (r === 'crash') burst(pass.failed.x, pass.failed.y, '#ffb347', 24); wait = 0.9; }
+  if (st.won) onWin();
 }
 
-function onHit() {
-  wait = 1.2;
-  if (celebrated) { say('Hit again!'); return; }
+function onWin() {
+  if (celebrated) {            // "Keep tinkering" after a win: no second pop-up, just start charging again
+    say('Charged again!');
+    st.won = false; st.charge = st.charge.map(() => 0);
+    return;
+  }
   celebrated = true;
+  const tg = level.target;
+  burst(tg.x, tg.y, '#7dffb0', 70, 220); burst(tg.x, tg.y, '#ffffff', 30, 140);
+  [523, 659, 784, 1047].forEach((f, i) => beep('win' + i, f, 0.3, 'triangle', 0.07, 0, i * 0.11));
+  mode = 'winning'; winTimer = 0.9;      // a short slow-motion moment before the stars appear
+}
+
+function showWin() {
   const used = shepherds.length;
   let stars = used <= level.par ? 3 : used === level.par + 1 ? 2 : 1;
   if (usedSolution) stars = 1;
   progress[level.id] = Math.max(progress[level.id] || 0, stars);
   saveProgress();
   mode = 'won';
-  $('winTitle').textContent = 'Target hit!';
+  $('winTitle').textContent = 'Ring charged!';
   $('winStars').innerHTML = STAR.repeat(stars) + '<i>' + STAR.repeat(3 - stars) + '</i>';
   $('winText').textContent = usedSolution ? 'You used the built-in solution, so this counts for 1 star. Try it your own way for more.'
     : `You used ${used} shepherd${used === 1 ? '' : 's'}. For three stars, use ${parText()}.`;
@@ -341,15 +371,16 @@ function onHit() {
   $('win').hidden = false;
 }
 
-// Move the game forward by dt seconds. Physics always runs in fixed steps of P.DT.
+// Move the game forward by dt seconds of real time. Physics always runs in fixed steps of P.DT.
 function advance(dt) {
   clock += dt;
   for (const s of sparks) { s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt; }
   sparks = sparks.filter(s => s.life > 0);
-  if (mode !== 'play' || !pass) return;
-  if (pass.result) { wait -= dt; if (wait <= 0) restartPass(); return; }
-  stepBank += dt;
-  while (stepBank >= P.DT && !pass.result && mode === 'play') { stepBank -= P.DT; stepOnce(); }
+  if (!st || (mode !== 'play' && mode !== 'winning')) return;
+  let speed = SPEED;
+  if (mode === 'winning') { speed = 0.4; winTimer -= dt; if (winTimer <= 0) { showWin(); return; } }
+  stepBank += dt * speed;
+  while (stepBank >= P.DT && (mode === 'play' || mode === 'winning')) { stepBank -= P.DT; stepOnce(); }
 }
 
 // ---------- Screen and world positions ----------
@@ -377,9 +408,11 @@ function shepherdAt(px, py) {
 // Tap a tray button, then tap the field to put that shepherd down. After that, a drag ANYWHERE
 // on the screen (like a laptop trackpad) changes the selected shepherd: it either sets its
 // fling arrow or moves it, depending on the Drag button. Tap a shepherd to select it.
+// Every change takes effect at once, while the stream keeps flowing.
 const fullDrag = () => Math.max(140, Math.min(W, H) * 0.45);   // drag this far for a full-speed fling
 
 canvas.addEventListener('pointerdown', e => {
+  wakeAudio();
   if (mode !== 'play') return;
   try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   let fresh = false;
@@ -387,9 +420,9 @@ canvas.addEventListener('pointerdown', e => {
     const [wx, wy] = toWorld(e.clientX, e.clientY);
     if (!place(placing, wx, wy)) return;
     fresh = true;
-    computePreview(); refreshUI();
+    changed();
   }
-  drag = { px: e.clientX, py: e.clientY, moved: false, fresh, edited: fresh, hit: fresh ? -1 : shepherdAt(e.clientX, e.clientY), kind: null };
+  drag = { px: e.clientX, py: e.clientY, moved: false, fresh, hit: fresh ? -1 : shepherdAt(e.clientX, e.clientY), kind: null };
 });
 
 canvas.addEventListener('pointermove', e => {
@@ -400,7 +433,7 @@ canvas.addEventListener('pointermove', e => {
     drag.moved = true;
     if (drag.hit >= 0) selected = drag.hit;        // a drag that starts on a shepherd grabs that one
     const s = shepherds[selected];
-    if (!s) { say(placing ? '' : 'Tap a shepherd in the tray first'); return; }
+    if (!s) { say('Tap a shepherd in the tray first'); return; }
     drag.kind = (P.TYPES[s.type].fixed || tool === 'move') ? 'move' : 'fling';
     drag.o = { ...s };
     refreshUI();
@@ -417,8 +450,7 @@ canvas.addEventListener('pointermove', e => {
     if (why) { say("Can't go there: " + why); return; }
     s.x = nx; s.y = ny;
   }
-  drag.edited = true;
-  computePreview();
+  changed();
 });
 
 function endDrag() {
@@ -426,20 +458,19 @@ function endDrag() {
   const d = drag; drag = null;
   if (mode !== 'play') return;
   if (!d.moved && !d.fresh && d.hit >= 0) { selected = d.hit; refreshUI(); }
-  if (d.edited) changed();     // the new set-up starts a fresh pass straight away
 }
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
 for (const type of ['anchor', 'runner', 'pusher'])
-  $('tray' + P.TYPES[type].name).onclick = () => { placing = placing === type ? null : type; if (placing) say('Now tap where it should go'); refreshUI(); };
+  $('tray' + P.TYPES[type].name).onclick = () => { wakeAudio(); placing = placing === type ? null : type; if (placing) say('Now tap where it should go'); refreshUI(); };
 $('btnTool').onclick = () => { tool = tool === 'fling' ? 'move' : 'fling'; refreshUI(); };
 $('btnRemove').onclick = removeSelected;
-$('btnRestart').onclick = restartPass;
-$('btnSolution').onclick = useSolution;
+$('btnSolution').onclick = () => { wakeAudio(); useSolution(); };
+$('btnSound').onclick = () => setMuted(!muted);
 $('btnMenu').onclick = showMenu;
 $('btnWinMenu').onclick = showMenu;
-$('btnKeep').onclick = () => { $('win').hidden = true; mode = 'play'; restartPass(); };
+$('btnKeep').onclick = () => { $('win').hidden = true; mode = 'play'; st.won = false; st.charge = st.charge.map(() => 0); };
 $('btnNext').onclick = () => startLevel(levelIndex + 1);
 $('btnDev').onclick = toggleDev;   // TEMPORARY (see the note next to the button above)
 
@@ -475,7 +506,7 @@ function arrow(x0, y0, x1, y1, color, width) {
 function draw() {
   ctx.fillStyle = '#05060d'; ctx.fillRect(0, 0, W, H);
   for (const s of stars) { ctx.fillStyle = `rgba(255,255,255,${s.a})`; ctx.fillRect(s.x * W, s.y * H, s.r, s.r); }
-  if (!level || mode === 'menu') return;
+  if (!level || !st || mode === 'menu') return;
 
   // Edge of the play area.
   ctx.strokeStyle = '#1c2344'; ctx.lineWidth = 1;
@@ -500,45 +531,44 @@ function draw() {
     ctx.strokeStyle = '#ff8a6b'; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(sx(w.x1), sy(w.y1)); ctx.lineTo(sx(w.x2), sy(w.y2)); ctx.stroke();
   }
+
+  // The ring. It glows brighter as it charges, and each silo has a meter arc around it.
+  const tg = level.target, tx = sx(tg.x), ty = sy(tg.y), tr = tg.r * zoom;
+  const full = Math.min(...st.charge) / st.goal;
+  const glow = ctx.createRadialGradient(tx, ty, tr * 0.2, tx, ty, tr * (1.6 + full));
+  glow.addColorStop(0, `rgba(93, 255, 156, ${0.10 + 0.45 * full})`); glow.addColorStop(1, 'rgba(93, 255, 156, 0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(tx, ty, tr * (1.6 + full), 0, 6.283); ctx.fill();
+  ctx.strokeStyle = '#5dff9c'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(tx, ty, tr * (1 + 0.04 * Math.sin(clock * 4)), 0, 6.283); ctx.stroke();
+  st.charge.forEach((c, i) => {
+    const rr = tr + 7 + i * 6;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(255, 255, 255, .12)'; ctx.beginPath(); ctx.arc(tx, ty, rr, 0, 6.283); ctx.stroke();
+    ctx.strokeStyle = STREAM_COLORS[i % 2];
+    ctx.beginPath(); ctx.arc(tx, ty, rr, -Math.PI / 2, -Math.PI / 2 + 6.283 * Math.min(1, c / st.goal)); ctx.stroke();
+  });
   ctx.lineCap = 'butt';
 
-  // Target ring.
-  const tg = level.target, pulse = 1 + 0.05 * Math.sin(clock * 3);
-  ctx.strokeStyle = '#5dff9c'; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.arc(sx(tg.x), sy(tg.y), tg.r * zoom * pulse, 0, 6.283); ctx.stroke();
-  ctx.fillStyle = 'rgba(93, 255, 156, .10)'; ctx.fill();
-
-  // Stardust: bright until collected on this pass, then faint.
-  for (const d of (pass ? pass.dust : [])) {
-    const px = sx(d.x), py = sy(d.y), tw = 1 + 0.25 * Math.sin(clock * 5 + d.x);
-    ctx.globalAlpha = d.got ? 0.18 : 1;
-    ctx.strokeStyle = 'rgba(255, 233, 168, .45)'; ctx.lineWidth = 1;
+  // Stardust: each speck flashes when a missile flies through it.
+  (level.dust || []).forEach((d, j) => {
+    const px = sx(d.x), py = sy(d.y), flash = Math.max(0, 1 - (clock - (dustFlash[j] || -9)) * 5);
+    ctx.strokeStyle = `rgba(255, 233, 168, ${0.45 + 0.55 * flash})`; ctx.lineWidth = 1 + 2 * flash;
     ctx.beginPath(); ctx.arc(px, py, P.DUST_R * zoom, 0, 6.283); ctx.stroke();
-    ctx.fillStyle = '#ffe9a8'; ctx.beginPath(); ctx.arc(px, py, 3.2 * tw, 0, 6.283); ctx.fill();
-    ctx.globalAlpha = 1;
-  }
+    ctx.fillStyle = '#ffe9a8'; ctx.beginPath(); ctx.arc(px, py, 3.2 + 3 * flash, 0, 6.283); ctx.fill();
+  });
 
-  // Silos, each with an arrow showing which way its missile leaves. A late silo shows its delay.
-  for (const so of P.silosOf(level)) {
-    const sa = Math.atan2(so.vy, so.vx);
-    ctx.fillStyle = '#8a9bff'; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 7, 0, 6.283); ctx.fill();
-    ctx.strokeStyle = '#8a9bff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 13, 0, 6.283); ctx.stroke();
-    arrow(sx(so.x) + 16 * Math.cos(sa), sy(so.y) + 16 * Math.sin(sa), sx(so.x) + 34 * Math.cos(sa), sy(so.y) + 34 * Math.sin(sa), '#8a9bff', 2);
-    if (so.delay) {
-      ctx.fillStyle = '#8a9bff'; ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('+' + so.delay + ' s', sx(so.x), sy(so.y) + 30);
-    }
-  }
-
-  // The pass before this one (faint), each missile's first second (dots), this pass (bright).
-  for (const g of ghosts) line(g, 'rgba(160, 175, 255, .22)', 1.5);
-  for (const pm of preview.missiles) line(pm, 'rgba(255, 255, 255, .35)', 1.5, [2, 6]);
-  for (const tr of trails) line(tr, '#ffffff', 2);
+  // Silos, each with an arrow showing which way its missiles leave.
+  P.silosOf(level).forEach((so, i) => {
+    const sa = Math.atan2(so.vy, so.vx), color = st.charge.length > 1 ? STREAM_COLORS[i % 2] : '#8a9bff';
+    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 7, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 13, 0, 6.283); ctx.stroke();
+    arrow(sx(so.x) + 16 * Math.cos(sa), sy(so.y) + 16 * Math.sin(sa), sx(so.x) + 34 * Math.cos(sa), sy(so.y) + 34 * Math.sin(sa), color, 2);
+  });
 
   // Where each of your shepherds starts, where it will travel, and its fling arrow.
   shepherds.forEach((s, i) => {
     const t = P.TYPES[s.type], px = sx(s.x), py = sy(s.y), pr = Math.max(4, radiusOf(s) * zoom);
-    line(preview.paths[i] || [], t.color + '99', 1.5, [3, 5]);
+    line(paths[i] || [], t.color + '99', 1.5, [3, 5]);
     ctx.strokeStyle = t.color; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.arc(px, py, pr + 3, 0, 6.283); ctx.stroke(); ctx.setLineDash([]);
     if (i === selected) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(px, py, pr + 8, 0, 6.283); ctx.stroke(); }
@@ -553,30 +583,42 @@ function draw() {
     }
   });
 
-  // Everything that is flying right now.
-  if (pass) {
-    for (const b of pass.things) {
-      if (b.dead) continue;
-      const color = b.color || (b.m < 0 ? '#b44dff' : '#f0a35e');
-      glowBall(b.x, b.y, b.r, color);
-      if (b.m < 0) {   // a Pusher gets a ring, so it reads as "pushes away"
-        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(sx(b.x), sy(b.y), b.r * zoom * (1.6 + 0.5 * ((clock * 0.8) % 1)), 0, 6.283); ctx.stroke();
-      }
-    }
-    for (const m of pass.missiles) {
-      if (m.done || m === pass.failed || pass.t < m.delay) continue;
-      const a = Math.atan2(m.vy, m.vx), px = sx(m.x), py = sy(m.y);
-      ctx.fillStyle = '#ffffff'; ctx.beginPath();
-      ctx.moveTo(px + 9 * Math.cos(a), py + 9 * Math.sin(a));
-      ctx.lineTo(px + 6 * Math.cos(a + 2.5), py + 6 * Math.sin(a + 2.5));
-      ctx.lineTo(px + 6 * Math.cos(a - 2.5), py + 6 * Math.sin(a - 2.5));
-      ctx.closePath(); ctx.fill();
+  // Planets, stars and shepherds as they are right now.
+  let movers = false;
+  for (const b of st.things) {
+    if (!b.fixed) movers = true;
+    if (b.dead) continue;
+    const color = b.color || (b.m < 0 ? '#b44dff' : '#f0a35e');
+    glowBall(b.x, b.y, b.r, color);
+    if (b.m < 0) {   // a Pusher gets a ring, so it reads as "pushes away"
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(sx(b.x), sy(b.y), b.r * zoom * (1.6 + 0.5 * ((clock * 0.8) % 1)), 0, 6.283); ctx.stroke();
     }
   }
 
+  // The heartbeat clock: a small ring in the corner of the play area that fills up, then
+  // everything that moves jumps back to its start. Only shown when something moves.
+  if (movers) {
+    const hx = sx(-P.AREA.x) + 22, hy = sy(P.AREA.y) - 22, f = (st.t - st.beatStart) / P.BEAT;
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(255, 255, 255, .15)';
+    ctx.beginPath(); ctx.arc(hx, hy, 10, 0, 6.283); ctx.stroke();
+    ctx.strokeStyle = '#5fd0ff';
+    ctx.beginPath(); ctx.arc(hx, hy, 10, -Math.PI / 2, -Math.PI / 2 + 6.283 * f); ctx.stroke();
+  }
+
+  // The stream: every missile is a bright dot with a short glowing tail.
+  ctx.lineCap = 'round';
+  for (const m of st.missiles) {
+    const color = STREAM_COLORS[m.silo % 2], px = sx(m.x), py = sy(m.y);
+    const lit = m.got.length && m.got.every(Boolean);        // carrying all the stardust: golden
+    ctx.strokeStyle = lit ? 'rgba(255, 233, 168, .55)' : 'rgba(170, 195, 255, .40)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(sx(m.x - m.vx * 0.09), sy(m.y - m.vy * 0.09)); ctx.stroke();
+    ctx.fillStyle = lit ? '#ffe9a8' : color; ctx.beginPath(); ctx.arc(px, py, 2.4, 0, 6.283); ctx.fill();
+  }
+  ctx.lineCap = 'butt';
+
   for (const s of sparks) {
-    ctx.globalAlpha = Math.max(0, Math.min(1, s.life * 2)); ctx.fillStyle = s.color;
+    ctx.globalAlpha = Math.max(0, Math.min(1, s.life * 2.5)); ctx.fillStyle = s.color;
     ctx.fillRect(sx(s.x) - 1.5, sy(s.y) - 1.5, 3, 3);
   }
   ctx.globalAlpha = 1;
@@ -598,17 +640,24 @@ function frame(now) {
 
 addEventListener('resize', resize);
 resize();
+setMuted(muted);
 showMenu();
 requestAnimationFrame(frame);
 
-// A handle for testing from the browser console, for example: game.startLevel(2); game.useSolution(); game.finishPass()
+// A handle for testing from the browser console, for example: game.startLevel(2); game.useSolution(); game.run(30)
 window.game = {
   levels: LEVELS, startLevel, showMenu, place: (...a) => { const ok = place(...a); changed(); return ok; },
-  useSolution, removeSelected, restartPass, advance,
-  finishPass() { while (mode === 'play' && pass && !pass.result) stepOnce(); return pass && pass.result; },
+  useSolution, removeSelected, advance,
+  // Run the stream for up to this many seconds of game time, without waiting. Says whether the level was won.
+  run(seconds) {
+    for (let k = 0; k < seconds * 120 && mode === 'play'; k++) stepOnce();
+    if (mode === 'winning') showWin();
+    return mode === 'won';
+  },
   get mode() { return mode; }, get shepherds() { return shepherds; }, get selected() { return selected; },
-  get pass() { return pass; }, get progress() { return progress; }, get passCount() { return passCount; },
+  get stream() { return st; }, get progress() { return progress; },
   get message() { return message && message.text; }, get placing() { return placing; }, get tool() { return tool; },
+  get muted() { return muted; }, get audio() { return audio; },
 };
 </script>
 </body>

@@ -3,13 +3,14 @@
 //   node check-levels.js          check all levels
 //   node check-levels.js w1-3     check only levels whose id starts with "w1-3"
 //
+// "Wins" below means: the stream of missiles fills the ring's charge meter (see physics.js).
 // A level passes when:
 //   1. its layout is sensible (things inside the play area, the solution fits the tray,
 //      no solution shepherd sits somewhere the player could not put it),
-//   2. with no shepherds at all, the missile misses,
-//   3. the built-in solution hits the target,
-//   4. it still hits when each shepherd is nudged a little (so it is not a pixel-perfect fluke),
-//   5. every shepherd in the solution is needed (taking any one away makes it miss),
+//   2. with no shepherds at all, the level is never won (tried for 40 seconds),
+//   3. the built-in solution wins within 30 seconds,
+//   4. it still wins when each shepherd is nudged a little (so it is not a pixel-perfect fluke),
+//   5. every shepherd in the solution is needed (taking any one away and it no longer wins),
 //   6. it uses its world's ingredient: world 2 levels have stardust, world 3 levels have two silos.
 
 const fs = require('fs');
@@ -74,28 +75,25 @@ function check(level) {
   if (!sol.length) problems.push('there is no solution');
   if (problems.length) return problems;
 
-  const empty = P.runPass(level, []);
-  if (empty.result === 'hit') problems.push('the missile hits the target with no shepherds at all');
+  if (P.runStream(level, [], 40).won) problems.push('the level is won with no shepherds at all');
 
-  const main = P.runPass(level, sol);
-  if (main.result !== 'hit') {
-    problems.push(`the solution does not hit (${main.result}, closest ${main.closest.toFixed(1)})`);
+  const main = P.runStream(level, sol, 30);
+  if (!main.won) {
+    problems.push('the solution does not win (best charge ' + Math.round(main.best * 100) + '%, hits ' + main.hits.join('+') + ')');
     return problems;
   }
-  if (main.time < 1.5) problems.push(`the flight is very short (${main.time.toFixed(1)} s)`);
 
   let bad = 0, total = 0;
   sol.forEach((s, i) => {
     for (const n of nudges(s)) {
       total++;
-      const r = P.runPass(level, sol.map((o, j) => j === i ? n : o));
-      if (r.result !== 'hit') bad++;
+      if (!P.runStream(level, sol.map((o, j) => j === i ? n : o), 30).won) bad++;
     }
   });
-  if (bad) problems.push(`the solution is fragile: ${bad} of ${total} small nudges make it miss`);
+  if (bad) problems.push(`the solution is fragile: ${bad} of ${total} small nudges make it fail`);
 
   if (sol.length > 1) sol.forEach((s, i) => {
-    if (P.runPass(level, sol.filter((o, j) => j !== i)).result === 'hit')
+    if (P.runStream(level, sol.filter((o, j) => j !== i), 30).won)
       problems.push(`solution shepherd ${i} (${s.type}) is not needed`);
   });
   return problems;
@@ -110,8 +108,8 @@ for (const level of levels) {
     console.log(`FAIL  ${level.id}  ${level.name}`);
     for (const p of problems) console.log('        - ' + p);
   } else {
-    const r = P.runPass(level, level.solution);
-    console.log(`ok    ${level.id}  ${level.name}  (${r.time.toFixed(1)} s, ${level.solution.length} shepherds)`);
+    const r = P.runStream(level, level.solution, 30);
+    console.log(`ok    ${level.id}  ${level.name}  (won after ${r.time.toFixed(1)} s, ${level.solution.length} shepherds)`);
   }
 }
 console.log(failed ? `\n${failed} of ${levels.length} levels failed.` : `\nAll ${levels.length} levels pass.`);

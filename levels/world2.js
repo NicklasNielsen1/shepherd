@@ -1,11 +1,11 @@
-// World 2: Stardust. The missile must fly through every speck of stardust before the ring counts.
+// World 2: Stardust. A missile only charges the ring if it flew through every speck of stardust.
 // The level format is explained at the top of physics.js.
 (globalThis.LEVELS = globalThis.LEVELS || []).push(
   // One speck above the missile's flat path: an Anchor lifts it through the speck and on to the ring.
   {
     id: 'w2-1',
     name: 'Dust Run',
-    hint: 'New: stardust. The ring only counts after the missile has flown through every speck.',
+    hint: 'New: stardust. A missile only charges the ring if it flew through every speck on its way. Those missiles turn golden.',
     silo: { x: -500, y: 60, vx: 120, vy: 0 },
     target: { x: 410, y: -310, r: 36 },
     bodies: [],
@@ -35,7 +35,7 @@
   {
     id: 'w2-3',
     name: 'Out of Reach',
-    hint: 'The speck sits in the shaded area where you cannot build. Send a Runner in to pull the missile across it.',
+    hint: 'The speck sits in the shaded area where you cannot build. Send a Runner drifting in to pull the stream across it.',
     silo: { x: -500, y: 250, vx: 120, vy: 0 },
     target: { x: 477, y: -231, r: 46 },
     bodies: [],
@@ -44,7 +44,8 @@
     dust: [ { x: 94, y: 47 } ],
     tray: { anchor: 0, runner: 2, pusher: 0 },
     par: 1,
-    solution: [ { type: 'runner', x: -415, y: 231, vx: 90, vy: -60 } ],
+    goal: 5,
+    solution: [ { type: 'runner', x: -417, y: 139, vx: 53, vy: 0 } ],
   },
   // A planet pulls the missile in. A Pusher from below sends it over the top, through the speck.
   {
@@ -76,23 +77,19 @@
     par: 1,
     solution: [ { type: 'anchor', x: -230, y: 250 } ],
   },
-  // Finale: the zig-zag from world 1, now with a speck just inside the no-build zone.
+  // Finale: hop over the planet through one speck, then dive under the wall through another.
   {
     id: 'w2-6',
-    name: 'Dusty Zig-Zag',
-    hint: 'Under the first wall, over the second, after picking up the speck at the bottom of the dip.',
-    silo: { x: -520, y: -80, vx: 120, vy: 0 },
-    target: { x: 500, y: 60, r: 46 },
-    bodies: [],
-    walls: [ { x1: -220, y1: -400, x2: -220, y2: 0 }, { x1: 240, y1: 400, x2: 240, y2: -20 } ],
-    zones: [ { x: -220, y: -400, w: 460, h: 800 } ],
-    dust: [ { x: -146, y: 41 } ],
+    name: 'Up and Over',
+    hint: 'One speck sits right above the planet, the other on the way down to the ring. Push the stream up, then pull it down.',
+    silo: { x: -520, y: 0, vx: 120, vy: 0 },
+    target: { x: 500, y: 250, r: 40 },
+    bodies: [ { x: 0, y: 0, m: 300000, fixed: true, color: '#c59bff' } ],
+    walls: [ { x1: 250, y1: 400, x2: 250, y2: 150 } ],
+    zones: [],
+    dust: [ { x: 1, y: -45 }, { x: 216, y: 42 } ],
     tray: { anchor: 1, runner: 1, pusher: 1 },
-    par: 3,
-    solution: [
-      { type: 'anchor', x: 298, y: 11 },
-      { type: 'runner', x: -523, y: 17, vx: 148, vy: -5 },
-      { type: 'pusher', x: -366, y: -280 },
-    ],
+    par: 2,
+    solution: [ { type: 'anchor', x: 80, y: 211 }, { type: 'pusher', x: -357, y: 184 } ],
   },
 );

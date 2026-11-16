@@ -3,6 +3,15 @@
 // Adapted from Slingshot's physics.js.
 //
 // ---------------------------------------------------------------------------------
+// HOW THE GAME RUNS
+// ---------------------------------------------------------------------------------
+// Each silo fires a steady stream of missiles (one every FIRE_EVERY seconds). The player's
+// shepherds bend the stream. Every missile that reaches the ring adds 1 charge; the charge
+// leaks away at LEAK per second. The level is won when the charge reaches the level's goal.
+// Every BEAT seconds all moving things (Runners, flung Pushers, moving planets) jump back
+// to where they started: the "heartbeat". Missiles are never reset.
+//
+// ---------------------------------------------------------------------------------
 // LEVEL FORMAT
 // ---------------------------------------------------------------------------------
 // The play area is 1200 wide and 800 tall, with (0, 0) in the middle:
@@ -13,13 +22,13 @@
 //   id: 'w1-1',
 //   name: 'First Nudge',
 //   hint: 'One short sentence shown to the player.',
-//   silo: { x: -500, y: 0, vx: 120, vy: 0 },   // where the missile starts, and how it flies off
+//   silo: { x: -500, y: 0, vx: 120, vy: 0 },   // where missiles start, and how they fly off
 //   target: { x: 450, y: -200, r: 30 },        // ring to reach; r is its radius
 //   bodies: [                                  // the level's own stars and planets
 //     { x: 0, y: 100, m: 400000, fixed: true, color: '#ffe28a' },   // stays still
 //     { x: 0, y: -50, m: 2000, vx: 50, vy: 0 },                     // moves under gravity
 //   ],
-//   walls: [ { x1: 100, y1: -400, x2: 100, y2: 50 } ],   // the missile explodes on these
+//   walls: [ { x1: 100, y1: -400, x2: 100, y2: 50 } ],   // missiles explode on these
 //   zones: [ { x: 300, y: -400, w: 300, h: 400 } ],      // no-build areas: x, y is the top-left corner
 //   tray: { anchor: 2, runner: 1, pusher: 0 },           // how many of each shepherd the player gets
 //   par: 1,                                              // shepherds allowed for 3 stars
@@ -28,12 +37,13 @@
 //     { type: 'runner', x: -100, y: 300, vx: 80, vy: -40 },
 //   ],
 //
-//   // Optional extras, each introduced by a later world:
-//   dust: [ { x: 100, y: -80 } ],              // world 2: stardust. Every speck must be collected
-//                                              //   before the ring counts.
-//   silos: [                                   // world 3: use this INSTEAD of "silo" for two missiles.
-//     { x: -500, y: -100, vx: 120, vy: 0 },    //   All of them must reach the ring.
-//     { x: -500, y: 100, vx: 120, vy: 0, delay: 1.5 },   // delay: fires this many seconds late
+//   // Optional extras:
+//   goal: 8,                                   // charge needed to win (GOAL if left out)
+//   dust: [ { x: 100, y: -80 } ],              // world 2: stardust. A missile only counts in the
+//                                              //   ring if it flew through every speck itself.
+//   silos: [                                   // world 3: use this INSTEAD of "silo" for two streams.
+//     { x: -500, y: -100, vx: 120, vy: 0 },    //   Each silo has its own charge meter, and all
+//     { x: -500, y: 100, vx: 120, vy: 0 },     //   meters must be full at the same time.
 //   ],
 // }
 //
@@ -43,23 +53,27 @@
 // - pusher: pushes things away instead of pulling. It can be flung too.
 //
 // Rules of the physics:
-// - The missile has no mass: everything pulls (or pushes) it, it affects nothing.
+// - Missiles have no mass: everything pulls (or pushes) them, they affect nothing.
 // - All bodies and shepherds act on each other, except fixed ones, which never move.
 // - A moving shepherd is destroyed if it touches a body, another shepherd or a wall.
-// - The missile explodes if it touches a body, a shepherd or a wall.
-// - With several missiles, the pass fails as soon as one of them is destroyed or lost.
+//   It comes back at the next heartbeat.
+// - A missile explodes if it touches a body, a shepherd or a wall.
 // - Time moves in fixed steps of DT, so the same set-up always gives the same result.
 // ---------------------------------------------------------------------------------
 
 (function (root) {
   const DT = 1 / 120;          // seconds per physics step
-  const MAX_TIME = 15;         // seconds before a pass is called off
+  const FIRE_EVERY = 0.25;     // seconds between missiles from one silo
+  const BEAT = 6;              // seconds between heartbeats
+  const GOAL = 12;             // charge needed to win, unless the level says otherwise
+  const LEAK = 0.5;            // charge lost per second
+  const MAX_AGE = 15;          // a missile that flies this long without getting anywhere fizzles out
   const MAX_FLING = 200;       // fastest a shepherd can be flung
   const SOFT = 4;              // stops gravity becoming infinite at zero distance
   const BOUNDS = { x: 750, y: 500 };
   const AREA = { x: 600, y: 400 };
   const MISSILE_R = 3;
-  const DUST_R = 14;           // how close the missile must pass to collect a speck of stardust
+  const DUST_R = 14;           // how close a missile must pass to collect a speck of stardust
 
   const TYPES = {
     anchor: { name: 'Anchor', m: 500000, fixed: true, color: '#ffe28a' },
@@ -78,6 +92,7 @@
 
   // A level has either one "silo" or a list of "silos". This always gives a list.
   const silosOf = level => level.silos || [level.silo];
+  const goalOf = level => level.goal || GOAL;
 
   // Shortest distance from point (px, py) to the wall w.
   function wallDist(px, py, w) {
@@ -111,31 +126,53 @@
     return '';
   }
 
-  // A fresh pass: the level's bodies, the player's shepherds, and the missile on its way.
-  function createPass(level, shepherds) {
+  // The level's bodies plus the player's shepherds, each remembering where it starts (x0, y0, ...)
+  // so the heartbeat can put it back.
+  function buildThings(level, shepherds) {
     const things = [];
+    const add = o => things.push({ ...o, x0: o.x, y0: o.y, vx0: o.vx, vy0: o.vy, dead: false, ax: 0, ay: 0 });
     for (const b of level.bodies || [])
-      things.push({ x: b.x, y: b.y, vx: b.vx || 0, vy: b.vy || 0, m: b.m, fixed: !!b.fixed,
-        r: radiusFor(b.m), color: b.color || null, shepherd: null, dead: false, ax: 0, ay: 0 });
+      add({ x: b.x, y: b.y, vx: b.vx || 0, vy: b.vy || 0, m: b.m, fixed: !!b.fixed, r: radiusFor(b.m), color: b.color || null, shepherd: null });
     (shepherds || []).forEach((s, i) => {
       const t = TYPES[s.type], v = t.fixed ? { vx: 0, vy: 0 } : clampFling(s.vx || 0, s.vy || 0);
-      things.push({ x: s.x, y: s.y, vx: v.vx, vy: v.vy, m: t.m, fixed: t.fixed,
-        r: radiusFor(t.m), color: t.color, shepherd: s.type, index: i, dead: false, ax: 0, ay: 0 });
+      add({ x: s.x, y: s.y, vx: v.vx, vy: v.vy, m: t.m, fixed: t.fixed, r: radiusFor(t.m), color: t.color, shepherd: s.type, index: i });
     });
-    // done: 'hit' once that missile has reached the ring. delay: seconds before it fires.
-    const missiles = silosOf(level).map(s => ({ x: s.x, y: s.y, vx: s.vx, vy: s.vy, ax: 0, ay: 0, delay: s.delay || 0, done: null }));
+    return things;
+  }
+
+  // A fresh stream: nothing in the air yet, no charge.
+  function createStream(level, shepherds) {
+    const silos = silosOf(level);
     return {
-      level, things, missiles,
-      missile: missiles[0],    // handy when there is only one
-      dust: (level.dust || []).map(d => ({ x: d.x, y: d.y, got: false })),
-      t: 0, result: null,      // 'hit' | 'crash' | 'lost' | 'timeout' once the pass ends
-      failed: null,            // the missile that ended the pass by crashing or getting lost
-      events: [],              // things that just happened, for the game to draw sparks
+      level, things: buildThings(level, shepherds),
+      missiles: [],              // in the air: {x, y, vx, vy, silo, born, got: [true/false per speck]}
+      t: 0, nextFire: 0, beatStart: 0,
+      charge: silos.map(() => 0), goal: goalOf(level),
+      hits: silos.map(() => 0), fired: 0,
+      won: false, wonAt: null,
+      noMissiles: false,         // the game sets this to see only where the shepherds go
+      events: [],                // things that just happened, for the game to draw sparks and play sounds
     };
   }
 
+  // The player changed the shepherds while the stream is running. Missiles in the air stay.
+  // If only still shepherds were moved, the moving ones carry on undisturbed; otherwise
+  // everything that moves starts its beat again.
+  function setShepherds(state, shepherds) {
+    const old = state.things.filter(t => t.shepherd);
+    const fresh = buildThings(state.level, shepherds);
+    const mine = fresh.filter(t => t.shepherd);
+    const sameMovers = old.length === mine.length && mine.every((n, i) => {
+      const o = old[i];
+      return o.shepherd === n.shepherd && (n.fixed || (o.x0 === n.x && o.y0 === n.y && o.vx0 === n.vx && o.vy0 === n.vy));
+    });
+    if (sameMovers) { mine.forEach((n, i) => { if (n.fixed) { old[i].x = old[i].x0 = n.x; old[i].y = old[i].y0 = n.y; } }); return; }
+    state.things = fresh;
+    state.beatStart = state.t;
+  }
+
   // Work out the pull (or push) on everything that moves.
-  function accelerations(state, flying) {
+  function accelerations(state) {
     const live = state.things.filter(b => !b.dead);
     for (const b of live) { b.ax = 0; b.ay = 0; }
     for (let i = 0; i < live.length; i++) {
@@ -149,7 +186,7 @@
         b.ax -= a.m * dx * inv; b.ay -= a.m * dy * inv;
       }
     }
-    for (const p of flying) {
+    for (const p of state.missiles) {
       p.ax = 0; p.ay = 0;
       for (const b of live) {
         const dx = b.x - p.x, dy = b.y - p.y;
@@ -161,22 +198,35 @@
   }
 
   // Move time forward by one step of DT ("leapfrog": half-kick, move, half-kick).
-  function stepPass(state) {
-    if (state.result) return state.result;
-    const walls = state.level.walls || [];
+  function stepStream(state) {
+    const level = state.level, walls = level.walls || [], tg = level.target;
+
+    // Heartbeat: everything that moves goes back to its start.
+    if (state.t - state.beatStart >= BEAT - 1e-9) {
+      state.beatStart = state.t;
+      for (const b of state.things) if (!b.fixed) { b.x = b.x0; b.y = b.y0; b.vx = b.vx0; b.vy = b.vy0; b.dead = false; }
+      state.events.push({ type: 'beat' });
+    }
+    // Fire the next missile from every silo.
+    if (!state.noMissiles && state.t >= state.nextFire - 1e-9) {
+      state.nextFire += FIRE_EVERY;
+      silosOf(level).forEach((s, i) => {
+        state.missiles.push({ x: s.x, y: s.y, vx: s.vx, vy: s.vy, ax: 0, ay: 0, silo: i, born: state.t, got: (level.dust || []).map(() => false) });
+        state.fired++;
+      });
+      state.events.push({ type: 'fire' });
+    }
+
     const bodies = state.things.filter(b => !b.dead && !b.fixed);
     const before = bodies.map(b => [b.x, b.y]);
-    // state.noMissile is set by the game when it only wants to know where the shepherds go.
-    const flying = state.noMissile ? [] : state.missiles.filter(m => !m.done && state.t >= m.delay);
-    const from = flying.map(m => [m.x, m.y]);
-    const movers = bodies.concat(flying);
-
-    accelerations(state, flying);
+    const from = state.missiles.map(m => [m.x, m.y]);
+    const movers = bodies.concat(state.missiles);
+    accelerations(state);
     for (const o of movers) {
       o.vx += o.ax * DT / 2; o.vy += o.ay * DT / 2;
       o.x += o.vx * DT; o.y += o.vy * DT;
     }
-    accelerations(state, flying);
+    accelerations(state);
     for (const o of movers) { o.vx += o.ax * DT / 2; o.vy += o.ay * DT / 2; }
     state.t += DT;
 
@@ -190,45 +240,63 @@
       if (hitWall || gone || bump) { b.dead = true; if (!gone) state.events.push({ type: 'shepherd', x: b.x, y: b.y }); }
     });
 
-    // Each missile in flight: collect stardust, then see whether it crashed, arrived or got lost.
-    const tg = state.level.target;
-    flying.forEach((p, i) => {
-      for (const d of state.dust)
-        if (!d.got && Math.hypot(d.x - p.x, d.y - p.y) < DUST_R) { d.got = true; state.events.push({ type: 'dust', x: d.x, y: d.y }); }
-      let end = null;
-      if (state.things.some(b => !b.dead && Math.hypot(b.x - p.x, b.y - p.y) < b.r + MISSILE_R)) end = 'crash';
-      else if (walls.some(w => crossesWall(from[i][0], from[i][1], p.x, p.y, w))) end = 'crash';
-      else if (Math.hypot(tg.x - p.x, tg.y - p.y) < tg.r && state.dust.every(d => d.got)) { p.done = 'hit'; state.events.push({ type: 'hit', x: p.x, y: p.y }); }
-      else if (Math.abs(p.x) > BOUNDS.x || Math.abs(p.y) > BOUNDS.y) end = 'lost';
-      if (end && !state.result) { state.result = end; state.failed = p; }
+    // Each missile: collect stardust, then see whether it crashed, arrived or got lost.
+    const dust = level.dust || [], alive = state.things.filter(b => !b.dead);
+    const keep = [];
+    state.missiles.forEach((p, i) => {
+      dust.forEach((d, j) => {
+        if (!p.got[j] && Math.hypot(d.x - p.x, d.y - p.y) < DUST_R) { p.got[j] = true; state.events.push({ type: 'dust', x: d.x, y: d.y, index: j }); }
+      });
+      if (alive.some(b => Math.hypot(b.x - p.x, b.y - p.y) < b.r + MISSILE_R) || walls.some(w => crossesWall(from[i][0], from[i][1], p.x, p.y, w)))
+        state.events.push({ type: 'crash', x: p.x, y: p.y });
+      else if (Math.hypot(tg.x - p.x, tg.y - p.y) < tg.r && p.got.every(Boolean)) {
+        state.charge[p.silo] = Math.min(state.goal, state.charge[p.silo] + 1);
+        state.hits[p.silo]++;
+        state.events.push({ type: 'hit', x: p.x, y: p.y, silo: p.silo });
+      }
+      else if (Math.abs(p.x) > BOUNDS.x || Math.abs(p.y) > BOUNDS.y || state.t - p.born > MAX_AGE) { /* lost: just gone */ }
+      else keep.push(p);
     });
-    if (!state.result) {
-      if (!state.noMissile && state.missiles.every(m => m.done)) state.result = 'hit';
-      else if (state.t >= MAX_TIME) state.result = 'timeout';
+    state.missiles = keep;
+
+    // Win when every meter is full; otherwise the charge leaks a little. A meter still counts
+    // as full for a second after its last hit, so two meters can be full "at the same time".
+    if (!state.won) {
+      if (state.charge.every(c => c >= state.goal - LEAK)) { state.won = true; state.wonAt = state.t; }
+      else state.charge = state.charge.map(c => Math.max(0, c - LEAK * DT));
     }
-    return state.result;
+    return state.won;
   }
 
-  // Play one whole pass and say how it ended. Used for testing and searching.
-  // "closest" is a rough "how far from winning" number: 0 for a hit, smaller is nearer.
-  function runPass(level, shepherds) {
-    const state = createPass(level, shepherds);
-    const tg = level.target;
-    const toTarget = state.missiles.map(() => Infinity), toDust = state.dust.map(() => Infinity);
-    const look = () => {
-      state.missiles.forEach((m, i) => { if (!m.done) toTarget[i] = Math.min(toTarget[i], Math.hypot(tg.x - m.x, tg.y - m.y)); });
-      state.dust.forEach((d, j) => { if (!d.got) for (const m of state.missiles) toDust[j] = Math.min(toDust[j], Math.hypot(d.x - m.x, d.y - m.y)); });
-    };
-    look();
-    while (!stepPass(state)) look();
-    let closest = 0;
-    state.missiles.forEach((m, i) => { if (!m.done) closest += toTarget[i]; });
-    state.dust.forEach((d, j) => { if (!d.got) closest += 300 + toDust[j]; });
-    return { result: state.result, time: state.t, closest, dust: state.dust.filter(d => d.got).length };
+  // Run the stream for a while and say whether the level was won. Used for testing and searching.
+  // "score" is a rough "how far from winning" number: 0 for a win, smaller is nearer.
+  function runStream(level, shepherds, seconds) {
+    const state = createStream(level, shepherds), tg = level.target, dust = level.dust || [];
+    const n = state.charge.length;
+    const toTarget = state.charge.map(() => Infinity), toDust = state.charge.map(() => dust.map(() => Infinity));
+    let best = 0;
+    const steps = Math.round((seconds || 30) / DT);
+    for (let k = 0; k < steps && !state.won; k++) {
+      stepStream(state);
+      best = Math.max(best, Math.min(...state.charge) / state.goal);
+      if (k % 4 === 0) for (const m of state.missiles) {
+        let ready = true;
+        dust.forEach((d, j) => { if (!m.got[j]) { ready = false; toDust[m.silo][j] = Math.min(toDust[m.silo][j], Math.hypot(d.x - m.x, d.y - m.y)); } else toDust[m.silo][j] = 0; });
+        if (ready) toTarget[m.silo] = Math.min(toTarget[m.silo], Math.hypot(tg.x - m.x, tg.y - m.y));
+      }
+    }
+    let miss = 0;
+    for (let i = 0; i < n; i++) {
+      if (state.hits[i]) continue;
+      const lacking = toDust[i].filter(d => d > 0);
+      miss += lacking.length ? lacking.reduce((a, d) => a + 300 + Math.min(d, 900), 0) + 400 : Math.min(toTarget[i], 900);
+    }
+    const score = state.won ? 0 : 1000 * (1 - best) + miss;
+    return { won: state.won, time: state.wonAt, hits: state.hits, fired: state.fired, best, score };
   }
 
-  const api = { DT, MAX_TIME, MAX_FLING, SOFT, BOUNDS, AREA, MISSILE_R, DUST_R, TYPES,
-    radiusFor, clampFling, wallDist, silosOf, whyNotBuildable, createPass, stepPass, runPass };
+  const api = { DT, FIRE_EVERY, BEAT, GOAL, LEAK, MAX_FLING, SOFT, BOUNDS, AREA, MISSILE_R, DUST_R, TYPES,
+    radiusFor, clampFling, wallDist, silosOf, goalOf, whyNotBuildable, createStream, setShepherds, stepStream, runStream };
   root.ShepherdPhysics = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
