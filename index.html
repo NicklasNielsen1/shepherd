@@ -40,6 +40,8 @@
   .card { width: min(520px, 100%); max-height: 100%; overflow: auto; text-align: center; padding: 20px; }
   .card h2 { margin: 0 0 4px; font-size: 26px; letter-spacing: 1px; }
   .card p { margin: 4px 0 12px; color: #9aa6d6; font-size: 14px; }
+  .world { text-align: left; margin-top: 14px; }
+  .world h3 { margin: 0 0 6px; font-size: 14px; color: #9aa6d6; font-weight: 600; }
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .lvl { padding: 8px 4px; text-align: center; line-height: 1.25; }
   .lvl b { display: block; font-size: 13px; }
@@ -78,7 +80,7 @@
     <h2>SHEPHERD</h2>
     <p>The missile fires by itself, over and over, and misses. Place and fling your shepherds so their gravity guides it into the green ring.</p>
     <p id="devNote" hidden style="color:#ffb347">Dev mode: all levels unlocked. Type "dev" again to turn it off.</p>
-    <div class="grid" id="levels"></div>
+    <div id="worlds"></div>
     <!-- TEMPORARY, for testing on a phone: remove this button (and its line in showMenu and
          its onclick below) when it is no longer needed. Typing "dev" keeps working without it. -->
     <div class="rowc"><button id="btnDev" style="opacity:.6;font-size:12px"></button></div>
@@ -100,9 +102,13 @@
 
 <script src="physics.js"></script>
 <script src="levels/world1.js"></script>
+<script src="levels/world2.js"></script>
+<script src="levels/world3.js"></script>
 <script>
 const P = ShepherdPhysics;
 const LEVELS = globalThis.LEVELS || [];
+const WORLD_NAMES = { 1: 'World 1 \u00B7 Shepherd School', 2: 'World 2 \u00B7 Stardust', 3: 'World 3 \u00B7 Twin Silos' };
+const worldOf = level => +level.id.match(/^w(\d+)/)[1];
 const $ = id => document.getElementById(id);
 const STAR = '★', LOCK = '🔒', TIMES = '×', MIDDOT = '·';
 
@@ -143,8 +149,8 @@ let placing = null;           // tray type waiting to be put down, or null
 let tool = 'fling';           // what a drag does to a Runner or Pusher: 'fling' | 'move'
 let pass = null;              // the pass being played right now (from physics.js)
 let passCount = 0, wait = 0;  // wait: pause after a pass ends, before the next one
-let trail = [], ghost = [];   // the missile's path this pass, and on the pass before
-let preview = { missile: [], paths: [] };   // dotted lines of where things will go
+let trails = [], ghosts = []; // each missile's path this pass, and on the pass before
+let preview = { missiles: [], paths: [] };  // dotted lines of where things will go
 let usedSolution = false, celebrated = false;
 let sparks = [], message = null, clock = 0, stepBank = 0;
 let drag = null;
@@ -156,11 +162,11 @@ function startLevel(i) {
   levelIndex = i; level = LEVELS[i];
   shepherds = []; selected = -1; placing = null; tool = 'fling';
   usedSolution = false; celebrated = false;
-  trail = []; ghost = []; sparks = []; passCount = 0; message = null;
+  trails = []; ghosts = []; sparks = []; passCount = 0; message = null;
   mode = 'play';
   $('menu').hidden = true; $('win').hidden = true;
   $('hud').hidden = false; $('buttons').hidden = false; $('corner').hidden = false;
-  $('lvlName').textContent = `${i + 1}. ${level.name}`;
+  $('lvlName').textContent = `${level.id.slice(1)} ${level.name}`;
   $('lvlHint').textContent = level.hint;
   // Pick the first shepherd type for the player, so the very first tap already builds something.
   placing = ['anchor', 'runner', 'pusher'].find(t => level.tray[t] > 0) || null;
@@ -173,14 +179,24 @@ function showMenu() {
   $('menu').hidden = false;
   $('devNote').hidden = !unlockAll;
   $('btnDev').textContent = unlockAll ? 'Dev mode: on (tap to turn off)' : 'Dev mode: off (tap to unlock all levels)';
-  const grid = $('levels');
-  grid.innerHTML = '';
+  const box = $('worlds');
+  box.innerHTML = '';
+  let grid = null, lastWorld = 0;
   LEVELS.forEach((lv, i) => {
+    const w = worldOf(lv);
+    if (w !== lastWorld) {
+      lastWorld = w;
+      const sec = document.createElement('div');
+      sec.className = 'world';
+      sec.innerHTML = '<h3>' + (WORLD_NAMES[w] || 'World ' + w) + '</h3><div class="grid"></div>';
+      box.appendChild(sec);
+      grid = sec.lastChild;
+    }
     const b = document.createElement('button');
     b.className = 'lvl';
     const open = isUnlocked(i), stars = progress[lv.id] || 0;
     b.disabled = !open;
-    b.innerHTML = `<b>${i + 1}. ${lv.name}</b><span>${open ? STAR.repeat(stars) + '<i style="color:#39406a;font-style:normal">' + STAR.repeat(3 - stars) + '</i>' : LOCK}</span>`;
+    b.innerHTML = '<b>' + lv.id.slice(1) + ' ' + lv.name + '</b><span>' + (open ? STAR.repeat(stars) + '<i style="color:#39406a;font-style:normal">' + STAR.repeat(3 - stars) + '</i>' : LOCK) + '</span>';
     b.onclick = () => startLevel(i);
     grid.appendChild(b);
   });
@@ -240,12 +256,15 @@ function changed() {
 function computePreview() {
   const st = P.createPass(level, shepherds);
   const mine = st.things.filter(t => t.shepherd);
-  preview = { missile: [[st.missile.x, st.missile.y]], paths: mine.map(t => [[t.x, t.y]]) };
+  preview = { missiles: st.missiles.map(m => [[m.x, m.y]]), paths: mine.map(t => [[t.x, t.y]]) };
+  const lastLaunch = Math.max(...st.missiles.map(m => m.delay));
   for (let n = 1; n <= 6 * 120; n++) {
     P.stepPass(st);
     if (!st.noMissile) {
-      if (n % 6 === 0) preview.missile.push([st.missile.x, st.missile.y]);
-      if (st.result || n >= 120) { st.result = null; st.noMissile = true; }   // from here on, shepherds only
+      if (n % 6 === 0) st.missiles.forEach((m, i) => {
+        if (!m.done && st.t >= m.delay && st.t <= m.delay + 1 && m !== st.failed) preview.missiles[i].push([m.x, m.y]);
+      });
+      if (st.result || st.t >= lastLaunch + 1) { st.result = null; st.noMissile = true; }   // from here on, shepherds only
     }
     if (n % 6 === 0) mine.forEach((t, i) => { if (!t.dead && !t.fixed) preview.paths[i].push([t.x, t.y]); });
   }
@@ -264,16 +283,24 @@ function refreshUI() {
   $('btnTool').disabled = !s || P.TYPES[s.type].fixed;
   $('btnTool').textContent = tool === 'fling' ? 'Drag: fling' : 'Drag: move';
   $('btnRemove').disabled = !s;
-  $('lvlCount').textContent = `Shepherds used: ${shepherds.length} ${MIDDOT} 3 stars: use ${parText()}`;
+  showCount();
   $('turn').hidden = !(H > W && W < 700);
+}
+
+// The line under the hint: shepherds used, and stardust collected so far on this pass.
+function showCount() {
+  let text = 'Shepherds used: ' + shepherds.length + ' ' + MIDDOT + ' 3 stars: use ' + parText();
+  if (pass && pass.dust.length) text += ' ' + MIDDOT + ' Stardust: ' + pass.dust.filter(d => d.got).length + '/' + pass.dust.length;
+  $('lvlCount').textContent = text;
 }
 
 // ---------- The loop: one pass after another ----------
 function restartPass() {
-  if (trail.length > 20) ghost = trail;
-  trail = [];
+  if (trails.some(tr => tr.length > 20)) ghosts = trails;
   pass = P.createPass(level, shepherds);
+  trails = pass.missiles.map(() => []);
   passCount++; wait = 0; stepBank = 0;
+  showCount();
 }
 
 function burst(x, y, color, n) {
@@ -284,12 +311,16 @@ function burst(x, y, color, n) {
 }
 
 function stepOnce() {
-  const r = P.stepPass(pass), m = pass.missile;
-  trail.push([m.x, m.y]);
-  for (const e of pass.events.splice(0)) burst(e.x, e.y, '#9fd8ff', 14);
+  const r = P.stepPass(pass);
+  pass.missiles.forEach((m, i) => { if (!m.done && pass.t >= m.delay) trails[i].push([m.x, m.y]); });
+  for (const e of pass.events.splice(0)) {
+    if (e.type === 'dust') { burst(e.x, e.y, '#ffe9a8', 16); showCount(); }
+    else if (e.type === 'hit') burst(e.x, e.y, '#7dffb0', 40);
+    else burst(e.x, e.y, '#9fd8ff', 14);
+  }
   if (!r) return;
-  if (r === 'hit') { burst(m.x, m.y, '#7dffb0', 40); onHit(); }
-  else { if (r === 'crash') burst(m.x, m.y, '#ffb347', 24); wait = 0.9; }
+  if (r === 'hit') onHit();
+  else { if (r === 'crash') burst(pass.failed.x, pass.failed.y, '#ffb347', 24); wait = 0.9; }
 }
 
 function onHit() {
@@ -477,15 +508,32 @@ function draw() {
   ctx.beginPath(); ctx.arc(sx(tg.x), sy(tg.y), tg.r * zoom * pulse, 0, 6.283); ctx.stroke();
   ctx.fillStyle = 'rgba(93, 255, 156, .10)'; ctx.fill();
 
-  // Silo, with an arrow showing which way the missile leaves.
-  const so = level.silo, sa = Math.atan2(so.vy, so.vx);
-  ctx.fillStyle = '#8a9bff'; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 7, 0, 6.283); ctx.fill();
-  ctx.strokeStyle = '#8a9bff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 13, 0, 6.283); ctx.stroke();
+  // Stardust: bright until collected on this pass, then faint.
+  for (const d of (pass ? pass.dust : [])) {
+    const px = sx(d.x), py = sy(d.y), tw = 1 + 0.25 * Math.sin(clock * 5 + d.x);
+    ctx.globalAlpha = d.got ? 0.18 : 1;
+    ctx.strokeStyle = 'rgba(255, 233, 168, .45)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(px, py, P.DUST_R * zoom, 0, 6.283); ctx.stroke();
+    ctx.fillStyle = '#ffe9a8'; ctx.beginPath(); ctx.arc(px, py, 3.2 * tw, 0, 6.283); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 
-  // The pass before this one (faint), the missile's first second (dots), this pass (bright).
-  line(ghost, 'rgba(160, 175, 255, .22)', 1.5);
-  line(preview.missile, 'rgba(255, 255, 255, .35)', 1.5, [2, 6]);
-  line(trail, '#ffffff', 2);
+  // Silos, each with an arrow showing which way its missile leaves. A late silo shows its delay.
+  for (const so of P.silosOf(level)) {
+    const sa = Math.atan2(so.vy, so.vx);
+    ctx.fillStyle = '#8a9bff'; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 7, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = '#8a9bff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx(so.x), sy(so.y), 13, 0, 6.283); ctx.stroke();
+    arrow(sx(so.x) + 16 * Math.cos(sa), sy(so.y) + 16 * Math.sin(sa), sx(so.x) + 34 * Math.cos(sa), sy(so.y) + 34 * Math.sin(sa), '#8a9bff', 2);
+    if (so.delay) {
+      ctx.fillStyle = '#8a9bff'; ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('+' + so.delay + ' s', sx(so.x), sy(so.y) + 30);
+    }
+  }
+
+  // The pass before this one (faint), each missile's first second (dots), this pass (bright).
+  for (const g of ghosts) line(g, 'rgba(160, 175, 255, .22)', 1.5);
+  for (const pm of preview.missiles) line(pm, 'rgba(255, 255, 255, .35)', 1.5, [2, 6]);
+  for (const tr of trails) line(tr, '#ffffff', 2);
 
   // Where each of your shepherds starts, where it will travel, and its fling arrow.
   shepherds.forEach((s, i) => {
@@ -516,8 +564,9 @@ function draw() {
         ctx.beginPath(); ctx.arc(sx(b.x), sy(b.y), b.r * zoom * (1.6 + 0.5 * ((clock * 0.8) % 1)), 0, 6.283); ctx.stroke();
       }
     }
-    if (!pass.result) {
-      const m = pass.missile, a = Math.atan2(m.vy, m.vx), px = sx(m.x), py = sy(m.y);
+    for (const m of pass.missiles) {
+      if (m.done || m === pass.failed || pass.t < m.delay) continue;
+      const a = Math.atan2(m.vy, m.vx), px = sx(m.x), py = sy(m.y);
       ctx.fillStyle = '#ffffff'; ctx.beginPath();
       ctx.moveTo(px + 9 * Math.cos(a), py + 9 * Math.sin(a));
       ctx.lineTo(px + 6 * Math.cos(a + 2.5), py + 6 * Math.sin(a + 2.5));
@@ -525,7 +574,6 @@ function draw() {
       ctx.closePath(); ctx.fill();
     }
   }
-  arrow(sx(so.x) + 16 * Math.cos(sa), sy(so.y) + 16 * Math.sin(sa), sx(so.x) + 34 * Math.cos(sa), sy(so.y) + 34 * Math.sin(sa), '#8a9bff', 2);
 
   for (const s of sparks) {
     ctx.globalAlpha = Math.max(0, Math.min(1, s.life * 2)); ctx.fillStyle = s.color;

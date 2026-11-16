@@ -9,7 +9,8 @@
 //   2. with no shepherds at all, the missile misses,
 //   3. the built-in solution hits the target,
 //   4. it still hits when each shepherd is nudged a little (so it is not a pixel-perfect fluke),
-//   5. every shepherd in the solution is needed (taking any one away makes it miss).
+//   5. every shepherd in the solution is needed (taking any one away makes it miss),
+//   6. it uses its world's ingredient: world 2 levels have stardust, world 3 levels have two silos.
 
 const fs = require('fs');
 const path = require('path');
@@ -45,8 +46,18 @@ function check(level) {
   const inArea = (o, what) => {
     if (Math.abs(o.x) > P.AREA.x || Math.abs(o.y) > P.AREA.y) problems.push(what + ' is outside the play area');
   };
-  inArea(level.silo, 'silo');
+  const silos = P.silosOf(level);
+  if (!silos.length || !silos[0]) return ['there is no silo'];
+  silos.forEach((s, i) => inArea(s, 'silo ' + i));
   inArea(level.target, 'target');
+  (level.dust || []).forEach((d, i) => {
+    inArea(d, 'stardust ' + i);
+    for (const b of level.bodies || []) if (b.fixed && Math.hypot(d.x - b.x, d.y - b.y) < P.radiusFor(b.m) + P.DUST_R) problems.push('stardust ' + i + ' is inside a planet or star');
+    for (const w of level.walls || []) if (P.wallDist(d.x, d.y, w) < 6) problems.push('stardust ' + i + ' is on a wall');
+  });
+  const world = +level.id.match(/^w(\d+)/)[1];
+  if (world === 2 && !(level.dust || []).length) problems.push('a world 2 level needs stardust');
+  if (world === 3 && silos.length < 2) problems.push('a world 3 level needs two silos');
   (level.bodies || []).forEach((b, i) => { if (b.fixed) inArea(b, 'body ' + i); });
 
   // The solution must fit the tray and sit where the player may build.

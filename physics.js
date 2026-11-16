@@ -27,6 +27,14 @@
 //     { type: 'anchor', x: 200, y: -250 },
 //     { type: 'runner', x: -100, y: 300, vx: 80, vy: -40 },
 //   ],
+//
+//   // Optional extras, each introduced by a later world:
+//   dust: [ { x: 100, y: -80 } ],              // world 2: stardust. Every speck must be collected
+//                                              //   before the ring counts.
+//   silos: [                                   // world 3: use this INSTEAD of "silo" for two missiles.
+//     { x: -500, y: -100, vx: 120, vy: 0 },    //   All of them must reach the ring.
+//     { x: -500, y: 100, vx: 120, vy: 0, delay: 1.5 },   // delay: fires this many seconds late
+//   ],
 // }
 //
 // Shepherds are the gravity objects the player puts down (see TYPES below):
@@ -39,6 +47,7 @@
 // - All bodies and shepherds act on each other, except fixed ones, which never move.
 // - A moving shepherd is destroyed if it touches a body, another shepherd or a wall.
 // - The missile explodes if it touches a body, a shepherd or a wall.
+// - With several missiles, the pass fails as soon as one of them is destroyed or lost.
 // - Time moves in fixed steps of DT, so the same set-up always gives the same result.
 // ---------------------------------------------------------------------------------
 
@@ -50,6 +59,7 @@
   const BOUNDS = { x: 750, y: 500 };
   const AREA = { x: 600, y: 400 };
   const MISSILE_R = 3;
+  const DUST_R = 14;           // how close the missile must pass to collect a speck of stardust
 
   const TYPES = {
     anchor: { name: 'Anchor', m: 500000, fixed: true, color: '#ffe28a' },
@@ -65,6 +75,9 @@
     if (s > MAX_FLING) { vx *= MAX_FLING / s; vy *= MAX_FLING / s; }
     return { vx, vy };
   }
+
+  // A level has either one "silo" or a list of "silos". This always gives a list.
+  const silosOf = level => level.silos || [level.silo];
 
   // Shortest distance from point (px, py) to the wall w.
   function wallDist(px, py, w) {
@@ -89,7 +102,8 @@
     if (Math.abs(x) > AREA.x - r || Math.abs(y) > AREA.y - r) return 'outside the play area';
     for (const z of level.zones || [])
       if (x > z.x - r && x < z.x + z.w + r && y > z.y - r && y < z.y + z.h + r) return 'inside a no-build zone';
-    if (Math.hypot(x - level.silo.x, y - level.silo.y) < r + 45) return 'too close to the silo';
+    for (const s of silosOf(level)) if (Math.hypot(x - s.x, y - s.y) < r + 45) return 'too close to the silo';
+    for (const d of level.dust || []) if (Math.hypot(x - d.x, y - d.y) < r + DUST_R + 4) return 'too close to the stardust';
     if (Math.hypot(x - level.target.x, y - level.target.y) < r + level.target.r + 10) return 'too close to the target';
     for (const b of level.bodies || [])
       if (Math.hypot(x - b.x, y - b.y) < r + radiusFor(b.m) + 10) return 'too close to a planet or star';
@@ -108,17 +122,21 @@
       things.push({ x: s.x, y: s.y, vx: v.vx, vy: v.vy, m: t.m, fixed: t.fixed,
         r: radiusFor(t.m), color: t.color, shepherd: s.type, index: i, dead: false, ax: 0, ay: 0 });
     });
+    // done: 'hit' once that missile has reached the ring. delay: seconds before it fires.
+    const missiles = silosOf(level).map(s => ({ x: s.x, y: s.y, vx: s.vx, vy: s.vy, ax: 0, ay: 0, delay: s.delay || 0, done: null }));
     return {
-      level, things,
-      missile: { x: level.silo.x, y: level.silo.y, vx: level.silo.vx, vy: level.silo.vy, ax: 0, ay: 0 },
+      level, things, missiles,
+      missile: missiles[0],    // handy when there is only one
+      dust: (level.dust || []).map(d => ({ x: d.x, y: d.y, got: false })),
       t: 0, result: null,      // 'hit' | 'crash' | 'lost' | 'timeout' once the pass ends
+      failed: null,            // the missile that ended the pass by crashing or getting lost
       events: [],              // things that just happened, for the game to draw sparks
     };
   }
 
   // Work out the pull (or push) on everything that moves.
-  function accelerations(state) {
-    const live = state.things.filter(b => !b.dead), p = state.missile;
+  function accelerations(state, flying) {
+    const live = state.things.filter(b => !b.dead);
     for (const b of live) { b.ax = 0; b.ay = 0; }
     for (let i = 0; i < live.length; i++) {
       const a = live[i];
@@ -131,37 +149,40 @@
         b.ax -= a.m * dx * inv; b.ay -= a.m * dy * inv;
       }
     }
-    p.ax = 0; p.ay = 0;
-    for (const b of live) {
-      const dx = b.x - p.x, dy = b.y - p.y;
-      const d2 = dx * dx + dy * dy + SOFT * SOFT;
-      const inv = b.m / (d2 * Math.sqrt(d2));
-      p.ax += dx * inv; p.ay += dy * inv;
+    for (const p of flying) {
+      p.ax = 0; p.ay = 0;
+      for (const b of live) {
+        const dx = b.x - p.x, dy = b.y - p.y;
+        const d2 = dx * dx + dy * dy + SOFT * SOFT;
+        const inv = b.m / (d2 * Math.sqrt(d2));
+        p.ax += dx * inv; p.ay += dy * inv;
+      }
     }
   }
 
   // Move time forward by one step of DT ("leapfrog": half-kick, move, half-kick).
   function stepPass(state) {
     if (state.result) return state.result;
-    const p = state.missile, walls = state.level.walls || [];
-    const movers = state.things.filter(b => !b.dead && !b.fixed);
-    const before = movers.map(b => [b.x, b.y]);
-    const px0 = p.x, py0 = p.y;
-    movers.push(p);
+    const walls = state.level.walls || [];
+    const bodies = state.things.filter(b => !b.dead && !b.fixed);
+    const before = bodies.map(b => [b.x, b.y]);
+    // state.noMissile is set by the game when it only wants to know where the shepherds go.
+    const flying = state.noMissile ? [] : state.missiles.filter(m => !m.done && state.t >= m.delay);
+    const from = flying.map(m => [m.x, m.y]);
+    const movers = bodies.concat(flying);
 
-    accelerations(state);
+    accelerations(state, flying);
     for (const o of movers) {
       o.vx += o.ax * DT / 2; o.vy += o.ay * DT / 2;
       o.x += o.vx * DT; o.y += o.vy * DT;
     }
-    accelerations(state);
+    accelerations(state, flying);
     for (const o of movers) { o.vx += o.ax * DT / 2; o.vy += o.ay * DT / 2; }
     state.t += DT;
 
     // Moving shepherds are destroyed by walls, by leaving space, and by touching anything.
     const live = state.things.filter(b => !b.dead);
-    movers.pop();
-    movers.forEach((b, i) => {
+    bodies.forEach((b, i) => {
       if (!b.shepherd) return;
       const hitWall = walls.some(w => crossesWall(before[i][0], before[i][1], b.x, b.y, w));
       const gone = Math.abs(b.x) > BOUNDS.x || Math.abs(b.y) > BOUNDS.y;
@@ -169,28 +190,45 @@
       if (hitWall || gone || bump) { b.dead = true; if (!gone) state.events.push({ type: 'shepherd', x: b.x, y: b.y }); }
     });
 
-    // state.noMissile is set by the game when it only wants to know where the shepherds go.
+    // Each missile in flight: collect stardust, then see whether it crashed, arrived or got lost.
     const tg = state.level.target;
-    if (state.noMissile) { if (state.t >= MAX_TIME) state.result = 'timeout'; }
-    else if (state.things.some(b => !b.dead && Math.hypot(b.x - p.x, b.y - p.y) < b.r + MISSILE_R)) state.result = 'crash';
-    else if (walls.some(w => crossesWall(px0, py0, p.x, p.y, w))) state.result = 'crash';
-    else if (Math.hypot(tg.x - p.x, tg.y - p.y) < tg.r) state.result = 'hit';
-    else if (Math.abs(p.x) > BOUNDS.x || Math.abs(p.y) > BOUNDS.y) state.result = 'lost';
-    else if (state.t >= MAX_TIME) state.result = 'timeout';
+    flying.forEach((p, i) => {
+      for (const d of state.dust)
+        if (!d.got && Math.hypot(d.x - p.x, d.y - p.y) < DUST_R) { d.got = true; state.events.push({ type: 'dust', x: d.x, y: d.y }); }
+      let end = null;
+      if (state.things.some(b => !b.dead && Math.hypot(b.x - p.x, b.y - p.y) < b.r + MISSILE_R)) end = 'crash';
+      else if (walls.some(w => crossesWall(from[i][0], from[i][1], p.x, p.y, w))) end = 'crash';
+      else if (Math.hypot(tg.x - p.x, tg.y - p.y) < tg.r && state.dust.every(d => d.got)) { p.done = 'hit'; state.events.push({ type: 'hit', x: p.x, y: p.y }); }
+      else if (Math.abs(p.x) > BOUNDS.x || Math.abs(p.y) > BOUNDS.y) end = 'lost';
+      if (end && !state.result) { state.result = end; state.failed = p; }
+    });
+    if (!state.result) {
+      if (!state.noMissile && state.missiles.every(m => m.done)) state.result = 'hit';
+      else if (state.t >= MAX_TIME) state.result = 'timeout';
+    }
     return state.result;
   }
 
   // Play one whole pass and say how it ended. Used for testing and searching.
+  // "closest" is a rough "how far from winning" number: 0 for a hit, smaller is nearer.
   function runPass(level, shepherds) {
     const state = createPass(level, shepherds);
     const tg = level.target;
-    let closest = Infinity;
-    while (!stepPass(state)) closest = Math.min(closest, Math.hypot(tg.x - state.missile.x, tg.y - state.missile.y));
-    return { result: state.result, time: state.t, closest };
+    const toTarget = state.missiles.map(() => Infinity), toDust = state.dust.map(() => Infinity);
+    const look = () => {
+      state.missiles.forEach((m, i) => { if (!m.done) toTarget[i] = Math.min(toTarget[i], Math.hypot(tg.x - m.x, tg.y - m.y)); });
+      state.dust.forEach((d, j) => { if (!d.got) for (const m of state.missiles) toDust[j] = Math.min(toDust[j], Math.hypot(d.x - m.x, d.y - m.y)); });
+    };
+    look();
+    while (!stepPass(state)) look();
+    let closest = 0;
+    state.missiles.forEach((m, i) => { if (!m.done) closest += toTarget[i]; });
+    state.dust.forEach((d, j) => { if (!d.got) closest += 300 + toDust[j]; });
+    return { result: state.result, time: state.t, closest, dust: state.dust.filter(d => d.got).length };
   }
 
-  const api = { DT, MAX_TIME, MAX_FLING, SOFT, BOUNDS, AREA, MISSILE_R, TYPES,
-    radiusFor, clampFling, wallDist, whyNotBuildable, createPass, stepPass, runPass };
+  const api = { DT, MAX_TIME, MAX_FLING, SOFT, BOUNDS, AREA, MISSILE_R, DUST_R, TYPES,
+    radiusFor, clampFling, wallDist, silosOf, whyNotBuildable, createPass, stepPass, runPass };
   root.ShepherdPhysics = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
